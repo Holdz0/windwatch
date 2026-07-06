@@ -49,7 +49,11 @@ const allowedOrigins = [
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+    
+    const isLocal = origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:');
+    const isAllowedProduction = process.env.FRONTEND_URL ? allowedOrigins.indexOf(origin) !== -1 : true;
+
+    if (isLocal || isAllowedProduction) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));

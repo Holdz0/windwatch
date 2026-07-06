@@ -6,7 +6,7 @@ interface HomeProps {
   initialRoomId: string | null;
 }
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
 const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
   const [username, setUsername] = useState('');

@@ -58,7 +58,7 @@ const createBlackVideoTrack = () => {
   return track;
 };
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
 // Helper to parse the VITE_BACKEND_URL into host, port, and secure parameters for PeerJS
 const getPeerConfig = () => {
