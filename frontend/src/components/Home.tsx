@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Video, ArrowRight, Loader, User, Link as LinkIcon, Plus, LogIn } from 'lucide-react';
+import { Video, ArrowRight, Loader, User, Link as LinkIcon, Plus, LogIn, Lock } from 'lucide-react';
 
 interface HomeProps {
-  onJoinRoom: (roomId: string, username: string) => void;
+  onJoinRoom: (roomId: string, username: string, password?: string) => void;
   initialRoomId: string | null;
 }
 
@@ -14,6 +14,8 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(initialRoomId ? 'join' : 'create');
+  const [usePassword, setUsePassword] = useState(false);
+  const [roomPassword, setRoomPassword] = useState('');
 
   // If initialRoomId changes, sync the active tab and input
   useEffect(() => {
@@ -37,6 +39,7 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
       const response = await fetch(`${BACKEND_URL}/create-room`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: usePassword ? roomPassword : null })
       });
 
       if (!response.ok) {
@@ -44,7 +47,7 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
       }
 
       const data = await response.json();
-      onJoinRoom(data.roomId, username);
+      onJoinRoom(data.roomId, username, usePassword ? roomPassword : undefined);
     } catch (err: any) {
       console.error(err);
       setError('Sunucu bağlantı hatası. Lütfen sunucunun açık olduğundan emin olun.');
@@ -163,6 +166,36 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
                   />
                 </div>
               </div>
+
+              <div className="form-group" style={{ marginTop: '16px', marginBottom: '16px' }}>
+                <label className="checkbox-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none', color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
+                  <input 
+                    type="checkbox" 
+                    checked={usePassword} 
+                    onChange={(e) => setUsePassword(e.target.checked)} 
+                    style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--color-blue)' }}
+                  />
+                  <span>Odayı Şifreyle Koru</span>
+                </label>
+              </div>
+
+              {usePassword && (
+                <div className="form-group fade-in" style={{ marginTop: '12px', marginBottom: '16px' }}>
+                  <label className="form-label">Oda Şifresi</label>
+                  <div className="input-with-icon-wrapper">
+                    <Lock className="input-icon" size={18} />
+                    <input 
+                      type="password" 
+                      className="form-input with-icon" 
+                      placeholder="Şifrenizi yazın" 
+                      value={roomPassword}
+                      onChange={(e) => setRoomPassword(e.target.value)}
+                      maxLength={20}
+                      required={usePassword}
+                    />
+                  </div>
+                </div>
+              )}
 
               <button type="submit" className="btn btn-primary btn-glow" disabled={loading}>
                 {loading ? (

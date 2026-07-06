@@ -8,12 +8,15 @@ const rooms = new Map();
  * Creates a new room in memory with a unique UUID.
  * @returns {string} The generated roomId.
  */
-function createRoom() {
+function createRoom(password = null) {
   const roomId = uuidv4();
   rooms.set(roomId, {
     roomId,
     users: new Map(),
-    hostSocketId: null
+    hostSocketId: null,
+    password: password || null,
+    isLocked: false,
+    messages: []
   });
 
   // Security cleanup: If no users join the room within 2 minutes, delete it to prevent RAM leak
@@ -51,7 +54,10 @@ function addUserToRoom(roomId, socketId, peerId, username) {
     rooms.set(roomId, {
       roomId,
       users: new Map(),
-      hostSocketId: null
+      hostSocketId: null,
+      password: null,
+      isLocked: false,
+      messages: []
     });
   }
 
@@ -169,6 +175,32 @@ function setUserScreenShare(roomId, socketId, isSharing) {
   return null;
 }
 
+/**
+ * Toggles the lock status of a room.
+ * @param {string} roomId 
+ * @param {string} socketId 
+ * @returns {boolean|null} The new lock status or null if unauthorized/not found.
+ */
+function toggleRoomLock(roomId, socketId) {
+  if (rooms.has(roomId)) {
+    const room = rooms.get(roomId);
+    if (room.hostSocketId === socketId) {
+      room.isLocked = !room.isLocked;
+      return room.isLocked;
+    }
+  }
+  return null;
+}
+
+/**
+ * Retrieves the raw room object (internal use for passwords/lock checks).
+ * @param {string} roomId 
+ * @returns {object|undefined}
+ */
+function getRoomRaw(roomId) {
+  return rooms.get(roomId);
+}
+
 module.exports = {
   createRoom,
   roomExists,
@@ -176,5 +208,7 @@ module.exports = {
   removeUserFromRoom,
   getRoomUsers,
   findRoomBySocketId,
-  setUserScreenShare
+  setUserScreenShare,
+  toggleRoomLock,
+  getRoomRaw
 };

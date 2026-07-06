@@ -5,6 +5,7 @@ import Room from './components/Room';
 function App() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(null);
+  const [roomPassword, setRoomPassword] = useState<string | null>(null);
 
   // Parse room ID from the URL on load
   useEffect(() => {
@@ -28,9 +29,12 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  const handleJoinRoom = (selectedRoomId: string, enteredUsername: string) => {
+  const handleJoinRoom = (selectedRoomId: string, enteredUsername: string, enteredPassword?: string) => {
     setUsername(enteredUsername);
     setRoomId(selectedRoomId);
+    if (enteredPassword) {
+      setRoomPassword(enteredPassword);
+    }
     
     // Update the browser URL without reloading the page
     window.history.pushState({}, '', `/room/${selectedRoomId}`);
@@ -39,13 +43,14 @@ function App() {
   const handleLeaveRoom = () => {
     setRoomId(null);
     setUsername(null);
+    setRoomPassword(null);
     
     // Reset URL to root
     window.history.pushState({}, '', '/');
   };
 
   return (
-    <div style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
+    <div className="app-container">
       {!roomId || !username ? (
         <Home 
           onJoinRoom={handleJoinRoom} 
@@ -55,6 +60,7 @@ function App() {
         <Room 
           roomId={roomId} 
           username={username} 
+          initialPassword={roomPassword}
           onLeave={handleLeaveRoom} 
         />
       )}

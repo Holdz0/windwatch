@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import io, { Socket } from 'socket.io-client';
 import { Peer } from 'peerjs';
-import { Copy, Users } from 'lucide-react';
+import { Copy, Users, Lock, Unlock, KeyRound } from 'lucide-react';
 import VideoGrid from './VideoGrid';
 import Chat from './Chat';
 import Controls from './Controls';
@@ -9,6 +9,7 @@ import Controls from './Controls';
 interface RoomProps {
   roomId: string;
   username: string;
+  initialPassword: string | null;
   onLeave: () => void;
 }
 
@@ -89,7 +90,7 @@ const getPeerConfig = () => {
   }
 };
 
-const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
+const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave }) => {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   
@@ -101,6 +102,16 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
   const [hostSocketId, setHostSocketId] = useState<string | null>(null);
   const [showCopiedToast, setShowCopiedToast] = useState(false);
 
+  // Password & Locking state
+  const [password, setPassword] = useState<string | null>(initialPassword);
+  const [isPasswordPromptOpen, setIsPasswordPromptOpen] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [isRoomLocked, setIsRoomLocked] = useState(false);
+
+  // Network stats state
+  const [connectionStats, setConnectionStats] = useState<Record<string, { rtt: number; packetLoss: number }>>({});
+
   const socketRef = useRef<Socket | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -108,10 +119,19 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   
+  // File sharing refs
+  const localSharedFilesRef = useRef<Record<string, File>>({});
+
   // Track active calls in a ref so we can close or modify them dynamically
   // Key: socketId, Value: PeerJS Call object
   const activeCalls = useRef<Record<string, any>>({});
   const socketUsersRef = useRef<Set<string>>(new Set());
+
+  // Ref to hold the latest password value for asynchronous handlers
+  const passwordRef = useRef<string | null>(initialPassword);
+  useEffect(() => {
+    passwordRef.current = password;
+  }, [password]);
 
   // Helper to compose a MediaStream containing only the currently active tracks
   const getActiveStream = () => {
@@ -137,6 +157,44 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
 
     return new MediaStream(tracks);
   };
+
+  // Timer to fetch WebRTC statistics every 4 seconds
+  useEffect(() => {
+    const statsTimer = setInterval(async () => {
+      const statsMap: Record<string, { rtt: number; packetLoss: number }> = {};
+      
+      for (const [socketId, call] of Object.entries(activeCalls.current)) {
+        if (call && call.peerConnection) {
+          try {
+            const stats = await call.peerConnection.getStats();
+            let rtt = 0;
+            let packetLoss = 0;
+            
+            stats.forEach((report: any) => {
+              if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                if (typeof report.currentRoundTripTime === 'number') {
+                  rtt = Math.round(report.currentRoundTripTime * 1000);
+                }
+              }
+              if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                const packetsLost = report.packetsLost || 0;
+                const packetsReceived = report.packetsReceived || 1;
+                packetLoss = Math.round((packetsLost / (packetsLost + packetsReceived)) * 100);
+              }
+            });
+            
+            statsMap[socketId] = { rtt, packetLoss };
+          } catch (err) {
+            // ignore stats retrieval errors
+          }
+        }
+      }
+      
+      setConnectionStats(statsMap);
+    }, 4000);
+    
+    return () => clearInterval(statsTimer);
+  }, []);
 
   useEffect(() => {
     let isCancelled = false;
@@ -184,7 +242,22 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
           if (isCancelled) return;
           console.log(`My PeerJS ID: ${peerId}`);
           // Join socket.io room
-          socket?.emit('join-room', { roomId, peerId, username });
+          socket?.emit('join-room', { roomId, peerId, username, password: passwordRef.current });
+        });
+
+        // 4.5. Handle incoming P2P file transfer connection requests
+        peer.on('connection', (conn) => {
+          if (conn.label === 'file-transfer') {
+            conn.on('data', (data: any) => {
+              if (data && data.type === 'request-file') {
+                const file = localSharedFilesRef.current[data.fileName];
+                if (file) {
+                  // Send file directly via PeerJS data channel
+                  conn.send({ type: 'file-response', file, fileName: data.fileName });
+                }
+              }
+            });
+          }
         });
 
         // 5. Peer incoming call handler (answering calls from others)
@@ -253,6 +326,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
                     peerId: u.peerId,
                     username: u.username,
                     isHost: u.isHost,
+                    isScreenSharing: u.isScreenSharing,
                     stream: existing?.stream // Preserve existing stream if available
                   };
                 })
@@ -301,6 +375,84 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
         socket.on('receive-message', (message: ChatMessage) => {
           if (isCancelled) return;
           setChatMessages(prev => [...prev, message]);
+        });
+
+        // 8.2. Socket message history initialization
+        socket.on('room-history', (history: ChatMessage[]) => {
+          if (isCancelled) return;
+          setChatMessages(history);
+        });
+
+        // 8.4. Socket password required query
+        socket.on('password-required', () => {
+          if (isCancelled) return;
+          setIsPasswordPromptOpen(true);
+          setPasswordError(null);
+        });
+
+        // 8.6. Socket room lock state listener
+        socket.on('room-locked-status', ({ isLocked }: { isLocked: boolean }) => {
+          if (isCancelled) return;
+          setIsRoomLocked(isLocked);
+        });
+
+        // 8.8. Socket kicked event
+        socket.on('kicked', (msg: string) => {
+          if (isCancelled) return;
+          alert(msg);
+          onLeave();
+        });
+
+        // 8.9. Remote mute request listener (Host muting us)
+        socket.on('mute-user-request', ({ trackKind }: { trackKind: 'audio' | 'video' }) => {
+          if (isCancelled) return;
+          if (trackKind === 'audio') {
+            setIsAudioMuted(true);
+            setParticipants(prev => prev.map(p => {
+              if (p.socketId === 'local') {
+                return { ...p, isAudioMuted: true };
+              }
+              return p;
+            }));
+            if (localStreamRef.current) {
+              const audioTrack = localStreamRef.current.getAudioTracks()[0];
+              if (audioTrack) audioTrack.stop();
+              const silentAudioTrack = createSilentAudioTrack();
+              localStreamRef.current.removeTrack(audioTrack);
+              localStreamRef.current.addTrack(silentAudioTrack);
+              
+              // Replace in active calls
+              Object.values(activeCalls.current).forEach((activeCall: any) => {
+                const senders = activeCall.peerConnection.getSenders();
+                const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
+                if (audioSender) audioSender.replaceTrack(silentAudioTrack);
+              });
+            }
+            alert('Oda kurucusu mikrofonunuzu kapattı.');
+          } else if (trackKind === 'video') {
+            setIsVideoMuted(true);
+            setParticipants(prev => prev.map(p => {
+              if (p.socketId === 'local') {
+                return { ...p, isVideoMuted: true };
+              }
+              return p;
+            }));
+            if (localStreamRef.current) {
+              const videoTrack = localStreamRef.current.getVideoTracks()[0];
+              if (videoTrack) videoTrack.stop();
+              const blackVideoTrack = createBlackVideoTrack();
+              localStreamRef.current.removeTrack(videoTrack);
+              localStreamRef.current.addTrack(blackVideoTrack);
+              
+              // Replace in active calls
+              Object.values(activeCalls.current).forEach((activeCall: any) => {
+                const senders = activeCall.peerConnection.getSenders();
+                const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
+                if (videoSender) videoSender.replaceTrack(blackVideoTrack);
+              });
+            }
+            alert('Oda kurucusu kameranızı kapattı.');
+          }
         });
 
         // 9. Socket user disconnected cleanup
@@ -748,6 +900,78 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
     }
   };
 
+  const handleShareFile = (file: File) => {
+    localSharedFilesRef.current[file.name] = file;
+    // Broadcast file offer metadata in chat channel
+    handleSendMessage(`[FILE]${file.name}|${file.size}|${file.type}`);
+  };
+
+  const handleDownloadFile = (senderSocketId: string, fileName: string, fileType: string) => {
+    const participant = participants.find(p => p.socketId === senderSocketId);
+    if (!participant || !peerRef.current) {
+      alert('Kullanıcı odada bulunamadı veya P2P bağlantısı kurulamıyor.');
+      return;
+    }
+    
+    const senderPeerId = participant.peerId;
+    const conn = peerRef.current.connect(senderPeerId, { label: 'file-transfer' });
+    
+    conn.on('open', () => {
+      conn.send({ type: 'request-file', fileName });
+    });
+    
+    conn.on('data', (data: any) => {
+      if (data && data.type === 'file-response' && data.file) {
+        const blob = new Blob([data.file], { type: fileType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        conn.close();
+      }
+    });
+    
+    conn.on('error', (err) => {
+      console.error('File transfer connection error:', err);
+      alert('Dosya indirilemedi. Lütfen tekrar deneyin.');
+    });
+  };
+
+  const toggleLockRoom = () => {
+    socketRef.current?.emit('toggle-lock-room');
+  };
+
+  const handleKickUser = (targetSocketId: string) => {
+    if (confirm('Bu kullanıcıyı odadan atmak istediğinize emin misiniz?')) {
+      socketRef.current?.emit('kick-user', { targetSocketId });
+    }
+  };
+
+  const handleRemoteMute = (targetSocketId: string, trackKind: 'audio' | 'video') => {
+    socketRef.current?.emit('mute-user-request', { targetSocketId, trackKind });
+  };
+
+  const handlePasswordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordInput.trim()) return;
+    setPassword(passwordInput);
+    setIsPasswordPromptOpen(false);
+    
+    // Retry join-room
+    socketRef.current?.emit('join-room', { 
+      roomId, 
+      peerId: peerRef.current?.id, 
+      username, 
+      password: passwordInput 
+    });
+  };
+
+  const localIsHost = participants.find(p => p.socketId === 'local')?.isHost || (hostSocketId && socketRef.current?.id === hostSocketId);
+
   return (
     <div className="room-container">
       {/* Toast Notification */}
@@ -755,19 +979,61 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
         Davet linki panoya kopyalandı!
       </div>
 
+      {/* Password Prompt Overlay */}
+      {isPasswordPromptOpen && (
+        <div className="password-prompt-overlay">
+          <div className="password-prompt-card">
+            <KeyRound size={32} className="password-icon" />
+            <h3>Şifreli Oda</h3>
+            <p>Bu odaya girmek için kurucusu tarafından belirlenen şifreyi yazın.</p>
+            {passwordError && <div className="error-alert">{passwordError}</div>}
+            <form onSubmit={handlePasswordSubmit}>
+              <input
+                type="password"
+                className="form-input"
+                placeholder="Oda Şifresi"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                autoFocus
+                required
+              />
+              <div className="password-prompt-buttons">
+                <button type="button" className="btn btn-secondary" onClick={onLeave}>Geri Dön</button>
+                <button type="submit" className="btn btn-primary">Giriş Yap</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       <div className="main-screen">
         {/* Header */}
         <header className="room-header">
-          <div className="room-title">
+          <div className="room-title" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <span className="live-badge">Yayında</span>
+            {isRoomLocked && (
+              <span className="lock-badge" title="Oda kilitli, yeni katılımcı giremez">
+                <Lock size={12} style={{ marginRight: '4px', verticalAlign: 'middle' }} /> Kilitli
+              </span>
+            )}
+            {localIsHost && (
+              <button 
+                onClick={toggleLockRoom} 
+                className={`lock-room-btn ${isRoomLocked ? 'locked' : ''}`}
+                title={isRoomLocked ? 'Odayı Girişlere Aç' : 'Odayı Girişlere Kilitle'}
+              >
+                {isRoomLocked ? <Unlock size={14} /> : <Lock size={14} />}
+                <span>{isRoomLocked ? 'Kilidi Aç' : 'Odayı Kilitle'}</span>
+              </button>
+            )}
             <div className="room-id-tag" onClick={copyRoomLink}>
-              Oda ID: <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{roomId}</span> <Copy size={14} style={{ marginLeft: '4px', verticalAlign: 'middle' }} />
+              <span className="room-id-label">Oda ID: </span><span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{roomId}</span> <Copy size={14} style={{ marginLeft: '4px', verticalAlign: 'middle' }} />
             </div>
           </div>
           
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
             <Users size={16} />
-            <span>{participants.length} Katılımcı</span>
+            <span>{participants.length} <span className="participant-label">Katılımcı</span></span>
           </div>
         </header>
 
@@ -777,6 +1043,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
             participants={participants} 
             hostSocketId={hostSocketId} 
             mySocketId={socketRef.current?.id || ''}
+            connectionStats={connectionStats}
+            onKickUser={handleKickUser}
+            onRemoteMute={handleRemoteMute}
           />
         </div>
 
@@ -796,12 +1065,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, onLeave }) => {
 
       {/* Slide-out Chat Pane */}
       {isChatOpen && (
-        <Chat 
-          messages={chatMessages} 
-          onSendMessage={handleSendMessage} 
-          myId={socketRef.current?.id || ''}
-          onClose={() => setIsChatOpen(false)}
-        />
+        <>
+          <div className="chat-backdrop" onClick={() => setIsChatOpen(false)} />
+          <Chat 
+            messages={chatMessages} 
+            onSendMessage={handleSendMessage} 
+            onShareFile={handleShareFile}
+            onDownloadFile={handleDownloadFile}
+            myId={socketRef.current?.id || ''}
+            onClose={() => setIsChatOpen(false)}
+          />
+        </>
       )}
     </div>
   );

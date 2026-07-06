@@ -83,8 +83,9 @@ const createRoomLimiter = rateLimit({
 // API: Create a new room
 app.post('/create-room', createRoomLimiter, (req, res) => {
   try {
-    const roomId = createRoom();
-    console.log(`Created room: ${roomId}`);
+    const { password } = req.body || {};
+    const roomId = createRoom(password);
+    console.log(`Created room: ${roomId} (Password protected: ${password ? 'Yes' : 'No'})`);
     res.status(201).json({ roomId });
   } catch (error) {
     console.error('Error creating room:', error);
