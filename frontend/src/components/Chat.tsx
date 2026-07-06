@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, X, Paperclip, FileText, Download, Check } from 'lucide-react';
+import { Send, X, Paperclip, FileText, Download, Check, ExternalLink } from 'lucide-react';
 import type { ChatMessage } from './Room';
 
 interface ChatProps {
@@ -9,6 +9,8 @@ interface ChatProps {
   onDownloadFile: (senderSocketId: string, fileName: string, fileType: string) => void;
   myId: string;
   onClose: () => void;
+  onDetach?: () => void;
+  isPiP?: boolean;
 }
 
 const Chat: React.FC<ChatProps> = ({ 
@@ -17,7 +19,9 @@ const Chat: React.FC<ChatProps> = ({
   onShareFile, 
   onDownloadFile, 
   myId, 
-  onClose 
+  onClose,
+  onDetach,
+  isPiP = false
 }) => {
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -95,18 +99,43 @@ const Chat: React.FC<ChatProps> = ({
     <div className="chat-panel">
       {/* Header */}
       <div className="chat-header">
-        <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Oda Sohbeti</h3>
-        <button 
-          onClick={onClose}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            color: 'var(--color-text-secondary)',
-            cursor: 'pointer'
-          }}
-        >
-          <X size={20} />
-        </button>
+        <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+          {isPiP ? 'Canlı Sohbet' : 'Oda Sohbeti'}
+        </h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {onDetach && !isPiP && (
+            <button 
+              type="button"
+              onClick={onDetach}
+              title="Sohbeti Ayrı Pencereye Al"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--color-text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center'
+              }}
+            >
+              <ExternalLink size={18} />
+            </button>
+          )}
+          <button 
+            type="button"
+            onClick={onClose}
+            title={isPiP ? 'Pencereyi Kapat ve Odaya Dön' : 'Sohbeti Kapat'}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--color-text-secondary)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center'
+            }}
+          >
+            <X size={20} />
+          </button>
+        </div>
       </div>
 
       {/* Message History */}

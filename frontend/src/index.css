@@ -1513,3 +1513,24 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
+
+/* Document PiP Detached Chat styling */
+.pip-body {
+  background: #080808 !important;
+  height: 100vh !important;
+  width: 100vw !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.pip-body .chat-panel {
+  position: static !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  transform: none !important;
+  animation: none !important;
+}

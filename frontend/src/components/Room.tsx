@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import io, { Socket } from 'socket.io-client';
 import { Peer } from 'peerjs';
 import { Copy, Users, Lock, Unlock, KeyRound } from 'lucide-react';
@@ -90,6 +91,30 @@ const getPeerConfig = () => {
   }
 };
 
+const playNotificationSound = () => {
+  try {
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioContextClass();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    
+    osc.type = 'sine';
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
+    
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch (err) {
+    // ignore audio block
+  }
+};
+
 const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave }) => {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -112,6 +137,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // Network stats state
   const [connectionStats, setConnectionStats] = useState<Record<string, { rtt: number; packetLoss: number }>>({});
 
+  // Document PiP Chat Window state
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
+
   const socketRef = useRef<Socket | null>(null);
   const peerRef = useRef<Peer | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -132,6 +160,27 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   useEffect(() => {
     passwordRef.current = password;
   }, [password]);
+
+  const pipWindowRef = useRef<Window | null>(null);
+  useEffect(() => {
+    pipWindowRef.current = pipWindow;
+  }, [pipWindow]);
+
+  // Clean up PiP window on unmount
+  useEffect(() => {
+    return () => {
+      if (pipWindowRef.current) {
+        pipWindowRef.current.close();
+      }
+    };
+  }, []);
+
+  // Request desktop notification permission on join
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
 
   // Helper to compose a MediaStream containing only the currently active tracks
   const getActiveStream = () => {
@@ -375,6 +424,24 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         socket.on('receive-message', (message: ChatMessage) => {
           if (isCancelled) return;
           setChatMessages(prev => [...prev, message]);
+
+          // Trigger notification & sound if tab is backgrounded / user is elsewhere (like during screen share)
+          const isMe = message.senderId === socket?.id || message.senderId === 'local';
+          if (!isMe && !document.hasFocus()) {
+            playNotificationSound();
+            if ('Notification' in window && Notification.permission === 'granted') {
+              let textToShow = message.text;
+              if (message.text.startsWith('[FILE]')) {
+                const parts = message.text.substring(6).split('|');
+                textToShow = `📁 Dosya paylaştı: ${parts[0]}`;
+              }
+              new Notification(message.senderName, {
+                body: textToShow,
+                tag: 'windwatch-chat',
+                silent: true // Since we play our own synthesized sound
+              });
+            }
+          }
         });
 
         // 8.2. Socket message history initialization
@@ -894,6 +961,56 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     }));
   };
 
+  const toggleChatPiP = async () => {
+    if (pipWindow) {
+      pipWindow.close();
+      setPipWindow(null);
+      return;
+    }
+
+    if ('documentPictureInPicture' in window) {
+      try {
+        const pip = await (window as any).documentPictureInPicture.requestWindow({
+          width: 380,
+          height: 550,
+        });
+
+        // Copy styles to Document PiP window
+        Array.from(document.styleSheets).forEach((sheet) => {
+          try {
+            const rules = Array.from(sheet.cssRules).map(r => r.cssText).join('');
+            const style = pip.document.createElement('style');
+            style.textContent = rules;
+            pip.document.head.appendChild(style);
+          } catch (e) {
+            const link = pip.document.createElement('link');
+            link.rel = 'stylesheet';
+            link.type = 'text/css';
+            link.href = sheet.href || '';
+            pip.document.head.appendChild(link);
+          }
+        });
+
+        // Style body
+        pip.document.body.className = 'pip-body';
+        pip.document.body.style.background = '#080808';
+        pip.document.body.style.margin = '0';
+        pip.document.body.style.overflow = 'hidden';
+
+        // Listen for PiP window closing
+        pip.addEventListener('unload', () => {
+          setPipWindow(null);
+        });
+
+        setPipWindow(pip);
+      } catch (err) {
+        console.error('Failed to detach chat window:', err);
+      }
+    } else {
+      alert('Tarayıcınız Document Picture-in-Picture API desteğine sahip değil. Lütfen güncel Chrome veya Edge kullanın.');
+    }
+  };
+
   const handleSendMessage = (text: string) => {
     if (socketRef.current && text.trim()) {
       socketRef.current.emit('send-message', { roomId, text });
@@ -1063,19 +1180,36 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         />
       </div>
 
-      {/* Slide-out Chat Pane */}
+      {/* Slide-out Chat Pane or popped out Document PiP */}
       {isChatOpen && (
-        <>
-          <div className="chat-backdrop" onClick={() => setIsChatOpen(false)} />
-          <Chat 
-            messages={chatMessages} 
-            onSendMessage={handleSendMessage} 
-            onShareFile={handleShareFile}
-            onDownloadFile={handleDownloadFile}
-            myId={socketRef.current?.id || ''}
-            onClose={() => setIsChatOpen(false)}
-          />
-        </>
+        pipWindow ? (
+          createPortal(
+            <Chat 
+              messages={chatMessages} 
+              onSendMessage={handleSendMessage} 
+              onShareFile={handleShareFile}
+              onDownloadFile={handleDownloadFile}
+              myId={socketRef.current?.id || ''}
+              onClose={() => { pipWindow.close(); setPipWindow(null); }}
+              isPiP={true}
+            />,
+            pipWindow.document.body
+          )
+        ) : (
+          <>
+            <div className="chat-backdrop" onClick={() => setIsChatOpen(false)} />
+            <Chat 
+              messages={chatMessages} 
+              onSendMessage={handleSendMessage} 
+              onShareFile={handleShareFile}
+              onDownloadFile={handleDownloadFile}
+              myId={socketRef.current?.id || ''}
+              onClose={() => setIsChatOpen(false)}
+              onDetach={toggleChatPiP}
+              isPiP={false}
+            />
+          </>
+        )
       )}
     </div>
   );
