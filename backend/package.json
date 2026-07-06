@@ -1,0 +1,23 @@
+{
+  "name": "windwatch-backend",
+  "version": "1.0.0",
+  "description": "Backend for anonymous video, audio and screen sharing platform",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.2.0",
+    "peer": "^1.0.2",
+    "socket.io": "^4.7.5",
+    "uuid": "^14.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "private": true
+}
