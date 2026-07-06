@@ -12,6 +12,7 @@ interface VideoGridProps {
   connectionStats: Record<string, { rtt: number; packetLoss: number }>;
   onKickUser?: (socketId: string) => void;
   onRemoteMute?: (socketId: string, trackKind: 'audio' | 'video') => void;
+  hideThumbnails?: boolean;
 }
 
 // Sub-component to manage individual participant streams and hooks
@@ -275,7 +276,8 @@ const VideoGrid: React.FC<VideoGridProps> = ({
   mySocketId, 
   connectionStats,
   onKickUser,
-  onRemoteMute
+  onRemoteMute,
+  hideThumbnails = false
 }) => {
   const [fullscreenSocketId, setFullscreenSocketId] = useState<string | null>(null);
   const [pinnedSocketId, setPinnedSocketId] = useState<string | null>(null);
@@ -343,7 +345,7 @@ const VideoGrid: React.FC<VideoGridProps> = ({
             onRemoteMute={(trackKind) => onRemoteMute?.(focusedUser.socketId, trackKind)}
           />
         </div>
-        {otherUsers.length > 0 && (
+        {otherUsers.length > 0 && !hideThumbnails && (
           <div className="thumbnails-strip-container">
             {otherUsers.map(p => (
               <ParticipantCard

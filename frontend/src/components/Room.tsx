@@ -124,6 +124,16 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(true);
   
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth <= 640);
+    };
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  
   const [hostSocketId, setHostSocketId] = useState<string | null>(null);
   const [showCopiedToast, setShowCopiedToast] = useState(false);
 
@@ -1087,6 +1097,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     });
   };
 
+  const hasActiveScreenShare = participants.some(p => p.isScreenSharing);
+  const showMobileScreenShareChat = isMobile && hasActiveScreenShare && isChatOpen && !pipWindow;
+
   const localIsHost = participants.find(p => p.socketId === 'local')?.isHost || (hostSocketId && socketRef.current?.id === hostSocketId);
 
   return (
@@ -1155,7 +1168,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         </header>
 
         {/* Video stream feeds workspace */}
-        <div className="video-workspace">
+        <div className={`video-workspace ${showMobileScreenShareChat ? 'mobile-ss-chat-active' : ''}`}>
           <VideoGrid 
             participants={participants} 
             hostSocketId={hostSocketId} 
@@ -1163,7 +1176,21 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
             connectionStats={connectionStats}
             onKickUser={handleKickUser}
             onRemoteMute={handleRemoteMute}
+            hideThumbnails={showMobileScreenShareChat}
           />
+          {showMobileScreenShareChat && (
+            <div className="mobile-chat-container">
+              <Chat 
+                messages={chatMessages} 
+                onSendMessage={handleSendMessage} 
+                onShareFile={handleShareFile}
+                onDownloadFile={handleDownloadFile}
+                myId={socketRef.current?.id || ''}
+                onClose={() => setIsChatOpen(false)}
+                isPiP={false}
+              />
+            </div>
+          )}
         </div>
 
         {/* Controls menu */}
@@ -1181,7 +1208,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       </div>
 
       {/* Slide-out Chat Pane or popped out Document PiP */}
-      {isChatOpen && (
+      {isChatOpen && !showMobileScreenShareChat && (
         pipWindow ? (
           createPortal(
             <Chat 

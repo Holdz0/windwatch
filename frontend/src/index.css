@@ -1534,3 +1534,44 @@ body {
   transform: none !important;
   animation: none !important;
 }
+
+/* Mobile Screen Share inline Chat styling */
+@media (max-width: 640px) {
+  .video-workspace.mobile-ss-chat-active {
+    flex-direction: column !important;
+    justify-content: flex-start !important;
+    align-items: stretch !important;
+    height: calc(100vh - var(--header-height) - var(--controls-height)) !important;
+    height: calc(100dvh - var(--header-height) - var(--controls-height)) !important;
+    padding: 8px !important;
+    gap: 8px !important;
+    overflow: hidden !important;
+  }
+
+  .video-workspace.mobile-ss-chat-active .video-grid, 
+  .video-workspace.mobile-ss-chat-active .screen-share-layout {
+    height: 42% !important;
+    flex: none !important;
+  }
+
+  .video-workspace.mobile-ss-chat-active .mobile-chat-container {
+    height: 58% !important;
+    flex: none !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    border-top: 1px solid var(--border-glass) !important;
+    padding-top: 8px !important;
+  }
+
+  .video-workspace.mobile-ss-chat-active .mobile-chat-container .chat-panel {
+    position: static !important;
+    width: 100% !important;
+    height: 100% !important;
+    border: none !important;
+    border-radius: var(--radius-md) !important;
+    box-shadow: none !important;
+    transform: none !important;
+    animation: none !important;
+  }
+}
