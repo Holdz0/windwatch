@@ -41,46 +41,60 @@ function roomExists(roomId) {
 }
 
 /**
- * Adds a user to a room. If the room is not pre-created, it will be initialized.
- * The first user joining becomes the Host.
- * @param {string} roomId 
- * @param {string} socketId 
- * @param {string} peerId 
- * @param {string} username 
- * @returns {object} The joined user, full list of room users, and the host's socket ID.
+ * Adds a user to a room. The room must already exist (created via createRoom);
+ * auto-creating rooms here previously allowed password/lock bypass and
+ * unbounded room creation via join-room spam.
+ * The first user joining becomes the Host. Stale entries with the same peerId
+ * (e.g. after a socket reconnect) are removed and host status is carried over.
+ * @param {string} roomId
+ * @param {string} socketId
+ * @param {string} peerId
+ * @param {string} username
+ * @returns {object|null} The joined user, full users list, host socket ID and
+ *                        removed stale socket IDs — or null if the room does not exist.
  */
 function addUserToRoom(roomId, socketId, peerId, username) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      roomId,
-      users: new Map(),
-      hostSocketId: null,
-      password: null,
-      isLocked: false,
-      messages: []
-    });
+  const room = rooms.get(roomId);
+  if (!room) return null;
+
+  // Remove stale entries left behind by a previous socket of the same peer (reconnect case)
+  const staleSocketIds = [];
+  let wasHostBefore = false;
+  if (peerId) {
+    for (const [sid, u] of room.users.entries()) {
+      if (u.peerId === peerId && sid !== socketId) {
+        if (room.hostSocketId === sid) wasHostBefore = true;
+        room.users.delete(sid);
+        staleSocketIds.push(sid);
+      }
+    }
   }
 
-  const room = rooms.get(roomId);
   const isFirstUser = room.users.size === 0;
+  const isHost = isFirstUser || wasHostBefore;
 
   const user = {
     socketId,
     peerId,
     username,
-    isHost: isFirstUser
+    isHost,
+    // Clients always join with fake (muted) tracks, so muted is the correct initial state
+    isAudioMuted: true,
+    isVideoMuted: true,
+    isScreenSharing: false
   };
 
   room.users.set(socketId, user);
 
-  if (isFirstUser) {
+  if (isHost) {
     room.hostSocketId = socketId;
   }
 
   return {
     user,
     roomUsers: Array.from(room.users.values()),
-    hostSocketId: room.hostSocketId
+    hostSocketId: room.hostSocketId,
+    staleSocketIds
   };
 }
 
@@ -176,6 +190,41 @@ function setUserScreenShare(roomId, socketId, isSharing) {
 }
 
 /**
+ * Updates a user's audio/video mute state so it can be synced to all clients.
+ * @param {string} roomId
+ * @param {string} socketId
+ * @param {boolean|undefined} isAudioMuted
+ * @param {boolean|undefined} isVideoMuted
+ * @returns {object|null} Updated room users list and host socket ID, or null.
+ */
+function setUserMediaState(roomId, socketId, isAudioMuted, isVideoMuted) {
+  const room = rooms.get(roomId);
+  if (!room) return null;
+  const user = room.users.get(socketId);
+  if (!user) return null;
+
+  if (typeof isAudioMuted === 'boolean') user.isAudioMuted = isAudioMuted;
+  if (typeof isVideoMuted === 'boolean') user.isVideoMuted = isVideoMuted;
+
+  return {
+    roomUsers: Array.from(room.users.values()),
+    hostSocketId: room.hostSocketId
+  };
+}
+
+const MAX_ROOM_MESSAGES = 50;
+
+/**
+ * Appends a message to the room history, enforcing the history size cap.
+ * @param {object} room
+ * @param {object} message
+ */
+function pushRoomMessage(room, message) {
+  room.messages.push(message);
+  if (room.messages.length > MAX_ROOM_MESSAGES) room.messages.shift();
+}
+
+/**
  * Toggles the lock status of a room.
  * @param {string} roomId 
  * @param {string} socketId 
@@ -209,6 +258,8 @@ module.exports = {
   getRoomUsers,
   findRoomBySocketId,
   setUserScreenShare,
+  setUserMediaState,
+  pushRoomMessage,
   toggleRoomLock,
   getRoomRaw
 };

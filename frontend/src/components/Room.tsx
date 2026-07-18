@@ -6,6 +6,12 @@ import { Copy, Users, Lock, Unlock, KeyRound } from 'lucide-react';
 import VideoGrid from './VideoGrid';
 import Chat from './Chat';
 import Controls from './Controls';
+import {
+  createSilentAudioTrack,
+  createBlackVideoTrack,
+  stopMediaTrack,
+  getSharedAudioContext
+} from '../utils/audio';
 
 interface RoomProps {
   roomId: string;
@@ -32,33 +38,35 @@ export interface ChatMessage {
   timestamp: string;
 }
 
-// Helper to create a silent audio track without requesting hardware permission
-const createSilentAudioTrack = () => {
-  const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const oscillator = ctx.createOscillator();
-  const dst = ctx.createMediaStreamDestination();
-  oscillator.connect(dst);
-  oscillator.start();
-  const track = dst.stream.getAudioTracks()[0];
-  track.enabled = false;
-  return track;
-};
+// File-offer chat messages: "[FILE]" prefix followed by JSON metadata.
+// JSON is used instead of a pipe-delimited format so file names containing
+// special characters can't break parsing; the id decouples lookups from names.
+export const FILE_MESSAGE_PREFIX = '[FILE]';
 
-// Helper to create a black video track without requesting hardware permission
-const createBlackVideoTrack = () => {
-  const canvas = document.createElement('canvas');
-  canvas.width = 640;
-  canvas.height = 480;
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+export interface SharedFileMeta {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+}
+
+export function parseFileMessage(text: string): SharedFileMeta | null {
+  if (!text.startsWith(FILE_MESSAGE_PREFIX)) return null;
+  try {
+    const meta = JSON.parse(text.slice(FILE_MESSAGE_PREFIX.length));
+    if (meta && typeof meta.id === 'string' && typeof meta.name === 'string') {
+      return {
+        id: meta.id,
+        name: meta.name,
+        size: Number(meta.size) || 0,
+        type: typeof meta.type === 'string' ? meta.type : ''
+      };
+    }
+  } catch {
+    // malformed metadata falls through to plain-text rendering
   }
-  const stream = (canvas as any).captureStream ? (canvas as any).captureStream(1) : (canvas as any).mozCaptureStream(1);
-  const track = stream.getVideoTracks()[0];
-  track.enabled = false;
-  return track;
-};
+  return null;
+}
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
@@ -67,14 +75,14 @@ const getPeerConfig = () => {
   try {
     const url = new URL(BACKEND_URL);
     const host = url.hostname;
-    
+
     let port = 80;
     if (url.port) {
       port = parseInt(url.port);
     } else if (url.protocol === 'https:') {
       port = 443;
     }
-    
+
     return {
       host,
       port,
@@ -93,21 +101,20 @@ const getPeerConfig = () => {
 
 const playNotificationSound = () => {
   try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    const ctx = new AudioContextClass();
+    const ctx = getSharedAudioContext();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    
+
     osc.type = 'sine';
     osc.connect(gain);
     gain.connect(ctx.destination);
-    
+
     osc.frequency.setValueAtTime(587.33, ctx.currentTime);
     osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
-    
+
     gain.gain.setValueAtTime(0.12, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-    
+
     osc.start();
     osc.stop(ctx.currentTime + 0.3);
   } catch (err) {
@@ -118,12 +125,12 @@ const playNotificationSound = () => {
 const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave }) => {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  
+
   const [isAudioMuted, setIsAudioMuted] = useState(true);
   const [isVideoMuted, setIsVideoMuted] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(true);
-  
+
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const handleResize = () => {
@@ -133,9 +140,23 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
-  
+
   const [hostSocketId, setHostSocketId] = useState<string | null>(null);
   const [showCopiedToast, setShowCopiedToast] = useState(false);
+
+  // Non-fatal warning toast (rate limits etc.) — these must NOT kick the user out of the room
+  const [warningToast, setWarningToast] = useState<string | null>(null);
+  const warningTimerRef = useRef<number | null>(null);
+  const showWarning = (msg: string) => {
+    setWarningToast(msg);
+    if (warningTimerRef.current) window.clearTimeout(warningTimerRef.current);
+    warningTimerRef.current = window.setTimeout(() => setWarningToast(null), 3500);
+  };
+  useEffect(() => {
+    return () => {
+      if (warningTimerRef.current) window.clearTimeout(warningTimerRef.current);
+    };
+  }, []);
 
   // Password & Locking state
   const [password, setPassword] = useState<string | null>(initialPassword);
@@ -154,22 +175,49 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const peerRef = useRef<Peer | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+
+  // Mic + system audio mixer nodes on the shared AudioContext
+  const mixerRef = useRef<{
+    micSource: MediaStreamAudioSourceNode;
+    screenSource: MediaStreamAudioSourceNode;
+    dest: MediaStreamAudioDestinationNode;
+  } | null>(null);
   const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
-  
-  // File sharing refs
+
+  // File sharing refs (keyed by generated file id, so same-named files can't collide)
   const localSharedFilesRef = useRef<Record<string, File>>({});
 
   // Track active calls in a ref so we can close or modify them dynamically
   // Key: socketId, Value: PeerJS Call object
   const activeCalls = useRef<Record<string, any>>({});
   const socketUsersRef = useRef<Set<string>>(new Set());
+  // Peer IDs of room members, used to authorize incoming file-transfer connections
+  const allowedPeerIdsRef = useRef<Set<string>>(new Set());
+  // True once we have successfully joined at least once (enables rejoin on reconnect)
+  const hasJoinedRef = useRef(false);
 
-  // Ref to hold the latest password value for asynchronous handlers
+  // Refs mirroring the latest state values for asynchronous handlers
   const passwordRef = useRef<string | null>(initialPassword);
   useEffect(() => {
     passwordRef.current = password;
   }, [password]);
+
+  const isAudioMutedRef = useRef(isAudioMuted);
+  useEffect(() => {
+    isAudioMutedRef.current = isAudioMuted;
+  }, [isAudioMuted]);
+
+  const isVideoMutedRef = useRef(isVideoMuted);
+  useEffect(() => {
+    isVideoMutedRef.current = isVideoMuted;
+  }, [isVideoMuted]);
+
+  // onLeave lives in a ref so a re-render of App can't tear down and rebuild
+  // the whole connection effect below.
+  const onLeaveRef = useRef(onLeave);
+  useEffect(() => {
+    onLeaveRef.current = onLeave;
+  }, [onLeave]);
 
   const pipWindowRef = useRef<Window | null>(null);
   useEffect(() => {
@@ -185,17 +233,21 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     };
   }, []);
 
-  // Request desktop notification permission on join
+  // Request desktop notification permission on the first user gesture —
+  // requesting without a gesture is ignored or auto-blocked by modern browsers.
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    const request = () => {
       Notification.requestPermission();
-    }
+    };
+    document.addEventListener('click', request, { once: true });
+    return () => document.removeEventListener('click', request);
   }, []);
 
   // Helper to compose a MediaStream containing only the currently active tracks
   const getActiveStream = () => {
     const tracks: MediaStreamTrack[] = [];
-    
+
     // Video Track: Use screen video if sharing, otherwise camera video
     if (screenStreamRef.current) {
       const screenVideoTrack = screenStreamRef.current.getVideoTracks()[0];
@@ -217,18 +269,130 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     return new MediaStream(tracks);
   };
 
+  const updateLocalParticipant = (patch: Partial<Participant>) => {
+    setParticipants(prev => prev.map(p => (p.socketId === 'local' ? { ...p, ...patch } : p)));
+  };
+
+  const emitMediaState = (state: { isAudioMuted?: boolean; isVideoMuted?: boolean }) => {
+    socketRef.current?.emit('media-state', state);
+  };
+
+  const replaceAudioSenders = (track: MediaStreamTrack) => {
+    Object.values(activeCalls.current).forEach((call: any) => {
+      const senders = call.peerConnection.getSenders();
+      const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
+      if (audioSender) audioSender.replaceTrack(track);
+    });
+  };
+
+  const replaceVideoSenders = (track: MediaStreamTrack) => {
+    Object.values(activeCalls.current).forEach((call: any) => {
+      const senders = call.peerConnection.getSenders();
+      const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
+      if (videoSender) videoSender.replaceTrack(track);
+    });
+  };
+
+  const teardownMixer = () => {
+    const m = mixerRef.current;
+    if (m) {
+      try { m.micSource.disconnect(); } catch { /* already disconnected */ }
+      try { m.screenSource.disconnect(); } catch { /* already disconnected */ }
+    }
+    mixerRef.current = null;
+    audioDestinationRef.current = null;
+  };
+
+  // (Re)builds the mic + system-audio mixer on the shared AudioContext.
+  // Returns the mixed track, or null when there is no screen audio to mix.
+  const buildMixer = (): MediaStreamTrack | null => {
+    teardownMixer();
+    if (
+      !screenStreamRef.current ||
+      screenStreamRef.current.getAudioTracks().length === 0 ||
+      !localStreamRef.current
+    ) {
+      return null;
+    }
+    try {
+      const ctx = getSharedAudioContext();
+      const micSource = ctx.createMediaStreamSource(localStreamRef.current);
+      const screenSource = ctx.createMediaStreamSource(screenStreamRef.current);
+      const dest = ctx.createMediaStreamDestination();
+      micSource.connect(dest);
+      screenSource.connect(dest);
+      mixerRef.current = { micSource, screenSource, dest };
+      audioDestinationRef.current = dest;
+      return dest.stream.getAudioTracks()[0] || null;
+    } catch (err) {
+      console.warn('Could not mix audio streams, falling back to mic audio only:', err);
+      return null;
+    }
+  };
+
+  // Replaces the current mic track with a synthetic silent one and syncs peers.
+  // Shared by the mute button and host-initiated remote mute.
+  const muteLocalAudio = () => {
+    if (!localStreamRef.current) return;
+
+    const oldAudioTrack = localStreamRef.current.getAudioTracks()[0];
+    stopMediaTrack(oldAudioTrack);
+    if (oldAudioTrack) localStreamRef.current.removeTrack(oldAudioTrack);
+
+    const silentAudioTrack = createSilentAudioTrack();
+    localStreamRef.current.addTrack(silentAudioTrack);
+
+    if (screenStreamRef.current) {
+      const mixed = buildMixer();
+      replaceAudioSenders(mixed ?? silentAudioTrack);
+    } else {
+      replaceAudioSenders(silentAudioTrack);
+    }
+
+    setIsAudioMuted(true);
+    updateLocalParticipant({ isAudioMuted: true });
+    emitMediaState({ isAudioMuted: true });
+  };
+
+  // Replaces the current camera track with a synthetic black one and syncs peers.
+  const muteLocalVideo = () => {
+    if (!localStreamRef.current) return;
+
+    const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
+    stopMediaTrack(oldVideoTrack);
+    if (oldVideoTrack) localStreamRef.current.removeTrack(oldVideoTrack);
+
+    const blackVideoTrack = createBlackVideoTrack();
+    localStreamRef.current.addTrack(blackVideoTrack);
+
+    if (!screenStreamRef.current) {
+      replaceVideoSenders(blackVideoTrack);
+    }
+
+    setIsVideoMuted(true);
+    updateLocalParticipant({ isVideoMuted: true, stream: getActiveStream() });
+    emitMediaState({ isVideoMuted: true });
+  };
+
   // Timer to fetch WebRTC statistics every 4 seconds
   useEffect(() => {
     const statsTimer = setInterval(async () => {
+      const calls = Object.entries(activeCalls.current);
+      if (calls.length === 0) {
+        // Avoid a re-render every tick when idle
+        setConnectionStats(prev => (Object.keys(prev).length ? {} : prev));
+        return;
+      }
+
       const statsMap: Record<string, { rtt: number; packetLoss: number }> = {};
-      
-      for (const [socketId, call] of Object.entries(activeCalls.current)) {
+
+      for (const [socketId, call] of calls) {
         if (call && call.peerConnection) {
           try {
             const stats = await call.peerConnection.getStats();
             let rtt = 0;
             let packetLoss = 0;
-            
+
             stats.forEach((report: any) => {
               if (report.type === 'candidate-pair' && report.state === 'succeeded') {
                 if (typeof report.currentRoundTripTime === 'number') {
@@ -241,17 +405,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                 packetLoss = Math.round((packetsLost / (packetsLost + packetsReceived)) * 100);
               }
             });
-            
+
             statsMap[socketId] = { rtt, packetLoss };
           } catch (err) {
             // ignore stats retrieval errors
           }
         }
       }
-      
+
       setConnectionStats(statsMap);
     }, 4000);
-    
+
     return () => clearInterval(statsTimer);
   }, []);
 
@@ -269,13 +433,13 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         const stream = new MediaStream([silentAudio, blackVideo]);
 
         if (isCancelled) {
-          stream.getTracks().forEach(track => track.stop());
+          stream.getTracks().forEach(track => stopMediaTrack(track));
           return;
         }
 
         localStream = stream;
         localStreamRef.current = stream;
-        
+
         // Temporarily render local stream locally
         // We will add ourselves as a participant with socketId: 'local'
         setParticipants([{
@@ -304,19 +468,50 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           socket?.emit('join-room', { roomId, peerId, username, password: passwordRef.current });
         });
 
+        // 4.2. Rejoin after a transient socket drop: Socket.io reconnects with a NEW
+        // socket id, so without re-emitting join-room the server considers us gone
+        // while the UI still shows the room (ghost session).
+        socket.on('connect', () => {
+          if (isCancelled) return;
+          if (hasJoinedRef.current && peer?.id) {
+            console.log('Socket reconnected, rejoining room...');
+            socket?.emit('join-room', { roomId, peerId: peer.id, username, password: passwordRef.current });
+          }
+        });
+
+        // 4.3. Recover the PeerJS signalling connection if it drops
+        peer.on('disconnected', () => {
+          if (isCancelled) return;
+          try {
+            peer?.reconnect();
+          } catch (err) {
+            console.warn('PeerJS reconnect failed:', err);
+          }
+        });
+
         // 4.5. Handle incoming P2P file transfer connection requests
         peer.on('connection', (conn) => {
-          if (conn.label === 'file-transfer') {
-            conn.on('data', (data: any) => {
-              if (data && data.type === 'request-file') {
-                const file = localSharedFilesRef.current[data.fileName];
-                if (file) {
-                  // Send file directly via PeerJS data channel
-                  conn.send({ type: 'file-response', file, fileName: data.fileName });
-                }
-              }
-            });
+          if (conn.label !== 'file-transfer') return;
+
+          // Only serve files to peers that are actually members of this room
+          if (!allowedPeerIdsRef.current.has(conn.peer)) {
+            console.warn(`Blocked file-transfer connection from unknown peer: ${conn.peer}`);
+            conn.on('open', () => conn.close());
+            return;
           }
+
+          conn.on('data', (data: any) => {
+            if (data && data.type === 'request-file' && typeof data.fileId === 'string') {
+              const file = localSharedFilesRef.current[data.fileId];
+              if (file) {
+                // Send file directly via PeerJS data channel
+                conn.send({ type: 'file-response', fileId: data.fileId, file });
+              } else {
+                // Tell the requester explicitly instead of leaving them waiting forever
+                conn.send({ type: 'file-error', fileId: data.fileId });
+              }
+            }
+          });
         });
 
         // 5. Peer incoming call handler (answering calls from others)
@@ -324,18 +519,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           if (isCancelled) return;
           console.log(`Receiving call from Peer: ${call.peer}`);
           const callerSocketId = call.metadata?.callerSocketId;
-          
-          // STRICT SECURITY CHECK: Reject calls from Peer IDs not mapped to socket users in the room
-          const isAuthorized = socketUsersRef.current.has(callerSocketId);
-          if (!isAuthorized) {
-            console.warn(`Blocked unauthorized PeerJS call from socketId: ${callerSocketId}`);
-            call.close();
-            return;
-          }
-          
-          if (localStream) {
+
+          const answerCall = () => {
+            if (isCancelled || !localStream) return;
             call.answer(getActiveStream());
-            
+
             call.on('stream', (remoteStream) => {
               if (isCancelled) return;
               console.log(`Received remote stream on answer`);
@@ -348,31 +536,53 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
               }));
             });
 
-            // Store call
             if (callerSocketId) {
               activeCalls.current[callerSocketId] = call;
             }
-          }
+          };
+
+          // SECURITY CHECK with retry: reject calls from Peer IDs not mapped to room members.
+          // The whitelist is filled by the room-users event, which can arrive AFTER the
+          // first incoming call (join broadcast race) — so retry briefly instead of
+          // permanently rejecting a legitimate call with no recovery path.
+          const tryAuthorize = (attempt: number) => {
+            if (isCancelled) return;
+            if (callerSocketId && socketUsersRef.current.has(callerSocketId)) {
+              answerCall();
+            } else if (attempt < 10) {
+              setTimeout(() => tryAuthorize(attempt + 1), 500);
+            } else {
+              console.warn(`Blocked unauthorized PeerJS call from socketId: ${callerSocketId}`);
+              call.close();
+            }
+          };
+          tryAuthorize(0);
         });
 
         // 6. Socket room users list synchronization
         socket.on('room-users', ({ roomUsers, hostSocketId: currentHostSocketId }) => {
           if (isCancelled) return;
           console.log('Room users updated from server:', roomUsers);
+          hasJoinedRef.current = true;
           setHostSocketId(currentHostSocketId);
+          // A successful join settles any pending password prompt
+          setIsPasswordPromptOpen(false);
+          setPasswordError(null);
 
-          // Update active socket users whitelist cache
+          // Update active socket users / peer id whitelist caches
           socketUsersRef.current.clear();
+          allowedPeerIdsRef.current.clear();
           roomUsers.forEach((u: any) => {
             if (u.socketId !== socket?.id) {
               socketUsersRef.current.add(u.socketId);
+              if (u.peerId) allowedPeerIdsRef.current.add(u.peerId);
             }
           });
 
           setParticipants(prev => {
             const localUser = prev.find(p => p.socketId === 'local');
             if (!localUser) return prev;
-            
+
             // Map the users list from server
             return [
               { ...localUser, isHost: currentHostSocketId === socket?.id },
@@ -386,6 +596,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                     username: u.username,
                     isHost: u.isHost,
                     isScreenSharing: u.isScreenSharing,
+                    isAudioMuted: u.isAudioMuted,
+                    isVideoMuted: u.isVideoMuted,
                     stream: existing?.stream // Preserve existing stream if available
                   };
                 })
@@ -394,17 +606,25 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         });
 
         // 7. Socket user connected (an existing user calls this new user)
-        socket.on('user-connected', ({ socketId, peerId, username: newUsername, isHost: isNewUserHost }) => {
+        socket.on('user-connected', ({ socketId, peerId, username: newUsername, isHost: isNewUserHost, isAudioMuted: newUserAudioMuted, isVideoMuted: newUserVideoMuted }) => {
           if (isCancelled) return;
           console.log(`New user connected: ${newUsername} (${socketId})`);
-          
-          // Whitelist new socket user
+
+          // Whitelist new socket user + peer id
           socketUsersRef.current.add(socketId);
+          if (peerId) allowedPeerIdsRef.current.add(peerId);
 
           // Add to participant list first (as loader or just tag)
           setParticipants(prev => {
             if (prev.some(p => p.socketId === socketId)) return prev;
-            return [...prev, { socketId, peerId, username: newUsername, isHost: isNewUserHost }];
+            return [...prev, {
+              socketId,
+              peerId,
+              username: newUsername,
+              isHost: isNewUserHost,
+              isAudioMuted: newUserAudioMuted ?? true,
+              isVideoMuted: newUserVideoMuted ?? true
+            }];
           });
 
           // Call the newly connected user, sending our local video stream
@@ -436,15 +656,13 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           setChatMessages(prev => [...prev, message]);
 
           // Trigger notification & sound if tab is backgrounded / user is elsewhere (like during screen share)
-          const isMe = message.senderId === socket?.id || message.senderId === 'local';
-          if (!isMe && !document.hasFocus()) {
+          const isMe = message.senderId === socket?.id;
+          const isSystem = message.senderId === 'system';
+          if (!isMe && !isSystem && !document.hasFocus()) {
             playNotificationSound();
             if ('Notification' in window && Notification.permission === 'granted') {
-              let textToShow = message.text;
-              if (message.text.startsWith('[FILE]')) {
-                const parts = message.text.substring(6).split('|');
-                textToShow = `📁 Dosya paylaştı: ${parts[0]}`;
-              }
+              const fileMeta = parseFileMessage(message.text);
+              const textToShow = fileMeta ? `📁 Dosya paylaştı: ${fileMeta.name}` : message.text;
               new Notification(message.senderName, {
                 body: textToShow,
                 tag: 'windwatch-chat',
@@ -463,8 +681,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         // 8.4. Socket password required query
         socket.on('password-required', () => {
           if (isCancelled) return;
+          // If we actually sent a password and were still rejected, it was wrong
+          if (passwordRef.current) {
+            setPasswordError('Şifre yanlış. Lütfen tekrar deneyin.');
+          }
           setIsPasswordPromptOpen(true);
-          setPasswordError(null);
         });
 
         // 8.6. Socket room lock state listener
@@ -477,58 +698,22 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         socket.on('kicked', (msg: string) => {
           if (isCancelled) return;
           alert(msg);
-          onLeave();
+          onLeaveRef.current();
         });
 
         // 8.9. Remote mute request listener (Host muting us)
         socket.on('mute-user-request', ({ trackKind }: { trackKind: 'audio' | 'video' }) => {
           if (isCancelled) return;
           if (trackKind === 'audio') {
-            setIsAudioMuted(true);
-            setParticipants(prev => prev.map(p => {
-              if (p.socketId === 'local') {
-                return { ...p, isAudioMuted: true };
-              }
-              return p;
-            }));
-            if (localStreamRef.current) {
-              const audioTrack = localStreamRef.current.getAudioTracks()[0];
-              if (audioTrack) audioTrack.stop();
-              const silentAudioTrack = createSilentAudioTrack();
-              localStreamRef.current.removeTrack(audioTrack);
-              localStreamRef.current.addTrack(silentAudioTrack);
-              
-              // Replace in active calls
-              Object.values(activeCalls.current).forEach((activeCall: any) => {
-                const senders = activeCall.peerConnection.getSenders();
-                const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-                if (audioSender) audioSender.replaceTrack(silentAudioTrack);
-              });
+            if (!isAudioMutedRef.current) {
+              muteLocalAudio();
             }
-            alert('Oda kurucusu mikrofonunuzu kapattı.');
+            showWarning('Oda kurucusu mikrofonunuzu kapattı.');
           } else if (trackKind === 'video') {
-            setIsVideoMuted(true);
-            setParticipants(prev => prev.map(p => {
-              if (p.socketId === 'local') {
-                return { ...p, isVideoMuted: true };
-              }
-              return p;
-            }));
-            if (localStreamRef.current) {
-              const videoTrack = localStreamRef.current.getVideoTracks()[0];
-              if (videoTrack) videoTrack.stop();
-              const blackVideoTrack = createBlackVideoTrack();
-              localStreamRef.current.removeTrack(videoTrack);
-              localStreamRef.current.addTrack(blackVideoTrack);
-              
-              // Replace in active calls
-              Object.values(activeCalls.current).forEach((activeCall: any) => {
-                const senders = activeCall.peerConnection.getSenders();
-                const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-                if (videoSender) videoSender.replaceTrack(blackVideoTrack);
-              });
+            if (!isVideoMutedRef.current) {
+              muteLocalVideo();
             }
-            alert('Oda kurucusu kameranızı kapattı.');
+            showWarning('Oda kurucusu kameranızı kapattı.');
           }
         });
 
@@ -536,32 +721,40 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         socket.on('user-disconnected', ({ socketId }) => {
           if (isCancelled) return;
           console.log(`Participant left room: ${socketId}`);
-          
-          // Remove from whitelist
+
+          // Remove from whitelists
           socketUsersRef.current.delete(socketId);
+          setParticipants(prev => {
+            const leaving = prev.find(p => p.socketId === socketId);
+            if (leaving?.peerId) allowedPeerIdsRef.current.delete(leaving.peerId);
+            return prev.filter(p => p.socketId !== socketId);
+          });
 
           // Close WebRTC call
           if (activeCalls.current[socketId]) {
             activeCalls.current[socketId].close();
             delete activeCalls.current[socketId];
           }
-
-          // Remove from state
-          setParticipants(prev => prev.filter(p => p.socketId !== socketId));
         });
 
-        // 10. General Socket Error Msg
+        // 10. Fatal errors: leave the room. Non-fatal issues arrive on 'warning-msg'.
         socket.on('error-msg', (msg) => {
           if (isCancelled) return;
           alert(`Hata: ${msg}`);
-          onLeave();
+          onLeaveRef.current();
+        });
+
+        // 10.5. Non-fatal warnings (rate limits etc.) — show a toast, stay in the room
+        socket.on('warning-msg', (msg: string) => {
+          if (isCancelled) return;
+          showWarning(msg);
         });
 
       } catch (err) {
         if (isCancelled) return;
         console.error('Media stream or connection initialization failed:', err);
-        alert('Kamera veya mikrofon erişimi reddedildi.');
-        onLeave();
+        alert('Bağlantı kurulamadı. Lütfen tekrar deneyin.');
+        onLeaveRef.current();
       }
     };
 
@@ -571,19 +764,24 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     return () => {
       isCancelled = true;
       console.log('Cleaning up room connections...');
-      
+
       // Stop all tracks in camera stream
       if (localStream) {
-        (localStream as MediaStream).getTracks().forEach(track => track.stop());
+        (localStream as MediaStream).getTracks().forEach(track => stopMediaTrack(track));
       }
 
       // Stop all tracks in screen stream
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach(track => track.stop());
+        screenStreamRef.current = null;
       }
+
+      // Tear down the audio mixer nodes
+      teardownMixer();
 
       // Close all PeerJS calls
       Object.values(activeCalls.current).forEach((call: any) => call.close());
+      activeCalls.current = {};
 
       // Disconnect socket
       if (socket) {
@@ -595,11 +793,12 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         (peer as Peer).destroy();
       }
     };
-  }, [roomId, username, onLeave]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, username]);
 
   // Copy invitation link to clipboard
   const copyRoomLink = () => {
-    const inviteUrl = `${window.location.origin}/room/${roomId}`;
+    const inviteUrl = `${window.location.origin}/room/${encodeURIComponent(roomId)}`;
     navigator.clipboard.writeText(inviteUrl).then(() => {
       setShowCopiedToast(true);
       setTimeout(() => setShowCopiedToast(false), 2500);
@@ -610,117 +809,36 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const toggleAudio = async () => {
     if (!localStreamRef.current) return;
 
-    const oldAudioTrack = localStreamRef.current.getAudioTracks()[0];
-
     if (isAudioMuted) {
       // Turn on microphone
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const realAudioTrack = stream.getAudioTracks()[0];
-        
-        if (realAudioTrack) {
-          if (oldAudioTrack) {
-            oldAudioTrack.stop();
-            localStreamRef.current.removeTrack(oldAudioTrack);
-          }
-          localStreamRef.current.addTrack(realAudioTrack);
+        if (!realAudioTrack) return;
 
-          // Update active calls
-          if (!screenStreamRef.current) {
-            Object.values(activeCalls.current).forEach((call: any) => {
-              const senders = call.peerConnection.getSenders();
-              const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-              if (audioSender) {
-                audioSender.replaceTrack(realAudioTrack);
-              }
-            });
-          } else if (screenStreamRef.current && audioContextRef.current) {
-            // Reconnect audio mixing with the new hardware track
-            audioContextRef.current.close();
-            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-            const audioCtx = new AudioContextClass();
-            audioContextRef.current = audioCtx;
+        const oldAudioTrack = localStreamRef.current.getAudioTracks()[0];
+        stopMediaTrack(oldAudioTrack);
+        if (oldAudioTrack) localStreamRef.current.removeTrack(oldAudioTrack);
+        localStreamRef.current.addTrack(realAudioTrack);
 
-            const micSource = audioCtx.createMediaStreamSource(localStreamRef.current);
-            const screenSource = audioCtx.createMediaStreamSource(screenStreamRef.current);
-            const dest = audioCtx.createMediaStreamDestination();
-            audioDestinationRef.current = dest;
-
-            micSource.connect(dest);
-            screenSource.connect(dest);
-
-            const mixedAudioTrack = dest.stream.getAudioTracks()[0];
-            Object.values(activeCalls.current).forEach((call: any) => {
-              const senders = call.peerConnection.getSenders();
-              const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-              if (audioSender && mixedAudioTrack) {
-                audioSender.replaceTrack(mixedAudioTrack);
-              }
-            });
-          }
-
-          setIsAudioMuted(false);
-          setParticipants(prev => prev.map(p => {
-            if (p.socketId === 'local') {
-              return { ...p, isAudioMuted: false };
-            }
-            return p;
-          }));
+        if (screenStreamRef.current) {
+          // Re-mix system audio with the new hardware mic track
+          const mixed = buildMixer();
+          replaceAudioSenders(mixed ?? realAudioTrack);
+        } else {
+          replaceAudioSenders(realAudioTrack);
         }
+
+        setIsAudioMuted(false);
+        updateLocalParticipant({ isAudioMuted: false });
+        emitMediaState({ isAudioMuted: false });
       } catch (err) {
         console.error('Mikrofon erişimi alınamadı:', err);
         alert('Mikrofon erişim izni verilmedi.');
       }
     } else {
       // Turn off microphone: stop hardware track to release recording indicator
-      if (oldAudioTrack) {
-        oldAudioTrack.stop();
-      }
-
-      const silentAudioTrack = createSilentAudioTrack();
-      localStreamRef.current.removeTrack(oldAudioTrack);
-      localStreamRef.current.addTrack(silentAudioTrack);
-
-      if (!screenStreamRef.current) {
-        Object.values(activeCalls.current).forEach((call: any) => {
-          const senders = call.peerConnection.getSenders();
-          const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-          if (audioSender) {
-            audioSender.replaceTrack(silentAudioTrack);
-          }
-        });
-      } else if (screenStreamRef.current && audioContextRef.current) {
-        // Reconnect audio mixing (with the silent track replacing the microphone)
-        audioContextRef.current.close();
-        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        const audioCtx = new AudioContextClass();
-        audioContextRef.current = audioCtx;
-
-        const micSource = audioCtx.createMediaStreamSource(localStreamRef.current);
-        const screenSource = audioCtx.createMediaStreamSource(screenStreamRef.current);
-        const dest = audioCtx.createMediaStreamDestination();
-        audioDestinationRef.current = dest;
-
-        micSource.connect(dest);
-        screenSource.connect(dest);
-
-        const mixedAudioTrack = dest.stream.getAudioTracks()[0];
-        Object.values(activeCalls.current).forEach((call: any) => {
-          const senders = call.peerConnection.getSenders();
-          const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-          if (audioSender && mixedAudioTrack) {
-            audioSender.replaceTrack(mixedAudioTrack);
-          }
-        });
-      }
-
-      setIsAudioMuted(true);
-      setParticipants(prev => prev.map(p => {
-        if (p.socketId === 'local') {
-          return { ...p, isAudioMuted: true };
-        }
-        return p;
-      }));
+      muteLocalAudio();
     }
   };
 
@@ -728,71 +846,33 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const toggleVideo = async () => {
     if (!localStreamRef.current) return;
 
-    const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
-
     if (isVideoMuted) {
       // Turn on camera
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
         const realVideoTrack = stream.getVideoTracks()[0];
-        
-        if (realVideoTrack) {
-          if (oldVideoTrack) {
-            oldVideoTrack.stop();
-            localStreamRef.current.removeTrack(oldVideoTrack);
-          }
-          localStreamRef.current.addTrack(realVideoTrack);
+        if (!realVideoTrack) return;
 
-          // Replace track in active calls
-          if (!screenStreamRef.current) {
-            Object.values(activeCalls.current).forEach((call: any) => {
-              const senders = call.peerConnection.getSenders();
-              const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-              if (videoSender) {
-                videoSender.replaceTrack(realVideoTrack);
-              }
-            });
-          }
+        const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
+        stopMediaTrack(oldVideoTrack);
+        if (oldVideoTrack) localStreamRef.current.removeTrack(oldVideoTrack);
+        localStreamRef.current.addTrack(realVideoTrack);
 
-          setIsVideoMuted(false);
-          setParticipants(prev => prev.map(p => {
-            if (p.socketId === 'local') {
-              return { ...p, isVideoMuted: false, stream: getActiveStream() };
-            }
-            return p;
-          }));
+        // Replace track in active calls (screen share video has priority while active)
+        if (!screenStreamRef.current) {
+          replaceVideoSenders(realVideoTrack);
         }
+
+        setIsVideoMuted(false);
+        updateLocalParticipant({ isVideoMuted: false, stream: getActiveStream() });
+        emitMediaState({ isVideoMuted: false });
       } catch (err) {
         console.error('Kamera erişimi alınamadı:', err);
         alert('Kamera erişim izni verilmedi.');
       }
     } else {
       // Turn off camera: stop hardware track to release green light
-      if (oldVideoTrack) {
-        oldVideoTrack.stop();
-      }
-
-      const blackVideoTrack = createBlackVideoTrack();
-      localStreamRef.current.removeTrack(oldVideoTrack);
-      localStreamRef.current.addTrack(blackVideoTrack);
-
-      if (!screenStreamRef.current) {
-        Object.values(activeCalls.current).forEach((call: any) => {
-          const senders = call.peerConnection.getSenders();
-          const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-          if (videoSender) {
-            videoSender.replaceTrack(blackVideoTrack);
-          }
-        });
-      }
-
-      setIsVideoMuted(true);
-      setParticipants(prev => prev.map(p => {
-        if (p.socketId === 'local') {
-          return { ...p, isVideoMuted: true, stream: getActiveStream() };
-        }
-        return p;
-      }));
+      muteLocalVideo();
     }
   };
 
@@ -816,39 +896,21 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           videoTrack.contentHint = 'motion'; // Optimize encoder for motion rendering (high FPS)
         }
 
-        let mixedAudioTrack: MediaStreamTrack | null = null;
-
-        // If screen sharing stream has audio tracks, mix them with microphone
-        if (stream.getAudioTracks().length > 0 && localStreamRef.current) {
-          try {
-            const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-            const audioCtx = new AudioContextClass();
-            audioContextRef.current = audioCtx;
-
-            const micSource = audioCtx.createMediaStreamSource(localStreamRef.current);
-            const screenSource = audioCtx.createMediaStreamSource(stream);
-            const dest = audioCtx.createMediaStreamDestination();
-            audioDestinationRef.current = dest;
-
-            micSource.connect(dest);
-            screenSource.connect(dest);
-
-            mixedAudioTrack = dest.stream.getAudioTracks()[0];
-            console.log("System audio mixed successfully with microphone.");
-          } catch (audioErr) {
-            console.warn("Could not mix audio streams, falling back to mic audio only:", audioErr);
-          }
+        // Mix system audio with microphone if the screen stream has audio
+        const mixedAudioTrack = buildMixer();
+        if (mixedAudioTrack) {
+          console.log('System audio mixed successfully with microphone.');
         }
 
         // Replace tracks in all active P2P calls
         Object.values(activeCalls.current).forEach(async (call: any) => {
           const senders = call.peerConnection.getSenders();
-          
+
           // Replace video track
           const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
           if (videoSender && videoTrack) {
             await videoSender.replaceTrack(videoTrack);
-            
+
             // Adjust encoding parameters for high-priority 4 Mbps screen share
             try {
               const params = videoSender.getParameters();
@@ -872,24 +934,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           }
         });
 
-        // Replace track in local rendering representation
-        setParticipants(prev => prev.map(p => {
-          if (p.socketId === 'local') {
-            return { ...p, stream: getActiveStream() };
-          }
-          return p;
-        }));
-
         setIsScreenSharing(true);
-        
-        socketRef.current?.emit('toggle-screen-share', { isSharing: true });
+        updateLocalParticipant({ isScreenSharing: true, stream: getActiveStream() });
 
-        setParticipants(prev => prev.map(p => {
-          if (p.socketId === 'local') {
-            return { ...p, isScreenSharing: true };
-          }
-          return p;
-        }));
+        socketRef.current?.emit('toggle-screen-share', { isSharing: true });
 
         // Listen for user stopping screen share via browser bar
         videoTrack.onended = () => {
@@ -910,12 +958,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       screenStreamRef.current = null;
     }
 
-    // Clean up AudioContext
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    audioDestinationRef.current = null;
+    // Tear down the audio mixer
+    teardownMixer();
 
     if (localStreamRef.current) {
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
@@ -924,18 +968,19 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       // Revert tracks in all active calls
       Object.values(activeCalls.current).forEach(async (call: any) => {
         const senders = call.peerConnection.getSenders();
-        
+
         // Revert video track to camera
         const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
         if (videoSender && videoTrack) {
           await videoSender.replaceTrack(videoTrack);
-          
+
           // Revert encoding parameters back to standard values
           try {
             const params = videoSender.getParameters();
             if (params.encodings && params.encodings.length > 0) {
               params.encodings[0].maxBitrate = 1500000; // Standard 1.5 Mbps camera
               params.encodings[0].priority = 'low';
+              params.encodings[0].networkPriority = 'low';
               await videoSender.setParameters(params);
             }
           } catch (pErr) {
@@ -949,26 +994,15 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           await audioSender.replaceTrack(audioTrack);
         }
       });
-
-      // Revert local state rendering stream
-      setParticipants(prev => prev.map(p => {
-        if (p.socketId === 'local') {
-          return { ...p, stream: localStreamRef.current! };
-        }
-        return p;
-      }));
     }
 
     setIsScreenSharing(false);
+    updateLocalParticipant({
+      isScreenSharing: false,
+      stream: localStreamRef.current ?? undefined
+    });
 
     socketRef.current?.emit('toggle-screen-share', { isSharing: false });
-
-    setParticipants(prev => prev.map(p => {
-      if (p.socketId === 'local') {
-        return { ...p, isScreenSharing: false };
-      }
-      return p;
-    }));
   };
 
   const toggleChatPiP = async () => {
@@ -1028,43 +1062,66 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   };
 
   const handleShareFile = (file: File) => {
-    localSharedFilesRef.current[file.name] = file;
+    const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    localSharedFilesRef.current[fileId] = file;
+    const meta: SharedFileMeta = { id: fileId, name: file.name, size: file.size, type: file.type };
     // Broadcast file offer metadata in chat channel
-    handleSendMessage(`[FILE]${file.name}|${file.size}|${file.type}`);
+    handleSendMessage(`${FILE_MESSAGE_PREFIX}${JSON.stringify(meta)}`);
   };
 
-  const handleDownloadFile = (senderSocketId: string, fileName: string, fileType: string) => {
-    const participant = participants.find(p => p.socketId === senderSocketId);
-    if (!participant || !peerRef.current) {
-      alert('Kullanıcı odada bulunamadı veya P2P bağlantısı kurulamıyor.');
-      return;
-    }
-    
-    const senderPeerId = participant.peerId;
-    const conn = peerRef.current.connect(senderPeerId, { label: 'file-transfer' });
-    
-    conn.on('open', () => {
-      conn.send({ type: 'request-file', fileName });
-    });
-    
-    conn.on('data', (data: any) => {
-      if (data && data.type === 'file-response' && data.file) {
-        const blob = new Blob([data.file], { type: fileType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        conn.close();
+  // Requests a shared file from its sender over a P2P data channel.
+  // Resolves when the download completes; rejects on timeout, transfer errors,
+  // or when the sender no longer has the file.
+  const handleDownloadFile = (senderSocketId: string, fileMeta: SharedFileMeta): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const participant = participants.find(p => p.socketId === senderSocketId);
+      if (!participant || !peerRef.current) {
+        reject(new Error('Kullanıcı odada bulunamadı veya P2P bağlantısı kurulamıyor.'));
+        return;
       }
-    });
-    
-    conn.on('error', (err) => {
-      console.error('File transfer connection error:', err);
-      alert('Dosya indirilemedi. Lütfen tekrar deneyin.');
+
+      const conn = peerRef.current.connect(participant.peerId, { label: 'file-transfer' });
+
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        try { conn.close(); } catch { /* already closed */ }
+        if (err) reject(err); else resolve();
+      };
+
+      const timeoutId = window.setTimeout(
+        () => finish(new Error('Dosya indirme zaman aşımına uğradı.')),
+        60000
+      );
+
+      conn.on('open', () => {
+        conn.send({ type: 'request-file', fileId: fileMeta.id });
+      });
+
+      conn.on('data', (data: any) => {
+        if (!data) return;
+        if (data.type === 'file-response' && data.fileId === fileMeta.id && data.file) {
+          const blob = new Blob([data.file], { type: fileMeta.type || 'application/octet-stream' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = fileMeta.name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          finish();
+        } else if (data.type === 'file-error') {
+          finish(new Error('Gönderen bu dosyayı artık paylaşmıyor.'));
+        }
+      });
+
+      conn.on('error', (err) => {
+        console.error('File transfer connection error:', err);
+        finish(new Error('Dosya indirilemedi. Lütfen tekrar deneyin.'));
+      });
     });
   };
 
@@ -1086,14 +1143,15 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     e.preventDefault();
     if (!passwordInput.trim()) return;
     setPassword(passwordInput);
+    setPasswordError(null);
     setIsPasswordPromptOpen(false);
-    
+
     // Retry join-room
-    socketRef.current?.emit('join-room', { 
-      roomId, 
-      peerId: peerRef.current?.id, 
-      username, 
-      password: passwordInput 
+    socketRef.current?.emit('join-room', {
+      roomId,
+      peerId: peerRef.current?.id,
+      username,
+      password: passwordInput
     });
   };
 
@@ -1104,9 +1162,12 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
   return (
     <div className="room-container">
-      {/* Toast Notification */}
+      {/* Toast Notifications */}
       <div className={`toast-notification ${showCopiedToast ? 'show' : ''}`}>
         Davet linki panoya kopyalandı!
+      </div>
+      <div className={`toast-notification warning ${warningToast ? 'show' : ''}`}>
+        {warningToast}
       </div>
 
       {/* Password Prompt Overlay */}
@@ -1147,8 +1208,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
               </span>
             )}
             {localIsHost && (
-              <button 
-                onClick={toggleLockRoom} 
+              <button
+                onClick={toggleLockRoom}
                 className={`lock-room-btn ${isRoomLocked ? 'locked' : ''}`}
                 title={isRoomLocked ? 'Odayı Girişlere Aç' : 'Odayı Girişlere Kilitle'}
               >
@@ -1160,7 +1221,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
               <span className="room-id-label">Oda ID: </span><span style={{ fontFamily: 'monospace', fontWeight: 600 }}>{roomId}</span> <Copy size={14} style={{ marginLeft: '4px', verticalAlign: 'middle' }} />
             </div>
           </div>
-          
+
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
             <Users size={16} />
             <span>{participants.length} <span className="participant-label">Katılımcı</span></span>
@@ -1169,9 +1230,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
         {/* Video stream feeds workspace */}
         <div className={`video-workspace ${showMobileScreenShareChat ? 'mobile-ss-chat-active' : ''}`}>
-          <VideoGrid 
-            participants={participants} 
-            hostSocketId={hostSocketId} 
+          <VideoGrid
+            participants={participants}
+            hostSocketId={hostSocketId}
             mySocketId={socketRef.current?.id || ''}
             connectionStats={connectionStats}
             onKickUser={handleKickUser}
@@ -1180,9 +1241,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           />
           {showMobileScreenShareChat && (
             <div className="mobile-chat-container">
-              <Chat 
-                messages={chatMessages} 
-                onSendMessage={handleSendMessage} 
+              <Chat
+                messages={chatMessages}
+                onSendMessage={handleSendMessage}
                 onShareFile={handleShareFile}
                 onDownloadFile={handleDownloadFile}
                 myId={socketRef.current?.id || ''}
@@ -1211,9 +1272,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       {isChatOpen && !showMobileScreenShareChat && (
         pipWindow ? (
           createPortal(
-            <Chat 
-              messages={chatMessages} 
-              onSendMessage={handleSendMessage} 
+            <Chat
+              messages={chatMessages}
+              onSendMessage={handleSendMessage}
               onShareFile={handleShareFile}
               onDownloadFile={handleDownloadFile}
               myId={socketRef.current?.id || ''}
@@ -1225,9 +1286,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         ) : (
           <>
             <div className="chat-backdrop" onClick={() => setIsChatOpen(false)} />
-            <Chat 
-              messages={chatMessages} 
-              onSendMessage={handleSendMessage} 
+            <Chat
+              messages={chatMessages}
+              onSendMessage={handleSendMessage}
               onShareFile={handleShareFile}
               onDownloadFile={handleDownloadFile}
               myId={socketRef.current?.id || ''}

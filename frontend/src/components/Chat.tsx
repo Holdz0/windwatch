@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, X, Paperclip, FileText, Download, Check, ExternalLink } from 'lucide-react';
-import type { ChatMessage } from './Room';
+import type { ChatMessage, SharedFileMeta } from './Room';
+import { parseFileMessage } from './Room';
 
 interface ChatProps {
   messages: ChatMessage[];
   onSendMessage: (text: string) => void;
   onShareFile: (file: File) => void;
-  onDownloadFile: (senderSocketId: string, fileName: string, fileType: string) => void;
+  onDownloadFile: (senderSocketId: string, file: SharedFileMeta) => Promise<void>;
   myId: string;
   onClose: () => void;
   onDetach?: () => void;
@@ -27,7 +28,7 @@ const Chat: React.FC<ChatProps> = ({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Track downloading states: fileName -> boolean
+  // Track downloading states: fileId -> boolean
   const [downloadingFiles, setDownloadingFiles] = useState<Record<string, boolean>>({});
 
   // Auto-scroll to bottom of chat when new message arrives
@@ -71,27 +72,25 @@ const Chat: React.FC<ChatProps> = ({
   };
 
   // Format bytes helper: e.g. "1.2 MB"
-  const formatBytes = (bytesStr: string) => {
-    const bytes = parseInt(bytesStr, 10);
-    if (isNaN(bytes) || bytes === 0) return '0 Bytes';
+  const formatBytes = (bytes: number) => {
+    if (isNaN(bytes) || bytes <= 0) return '0 Bytes';
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  // Trigger P2P file transfer download
-  const triggerDownload = async (senderSocketId: string, fileName: string, fileType: string) => {
-    setDownloadingFiles(prev => ({ ...prev, [fileName]: true }));
+  // Trigger P2P file transfer download. The returned promise settles when the
+  // transfer actually completes or fails, so the button state reflects reality.
+  const triggerDownload = async (senderSocketId: string, file: SharedFileMeta) => {
+    setDownloadingFiles(prev => ({ ...prev, [file.id]: true }));
     try {
-      await onDownloadFile(senderSocketId, fileName, fileType);
-    } catch (err) {
+      await onDownloadFile(senderSocketId, file);
+    } catch (err: any) {
       console.error(err);
+      alert(err?.message || 'Dosya indirilemedi. Lütfen tekrar deneyin.');
     } finally {
-      // Keep completed state representation briefly
-      setTimeout(() => {
-        setDownloadingFiles(prev => ({ ...prev, [fileName]: false }));
-      }, 3000);
+      setDownloadingFiles(prev => ({ ...prev, [file.id]: false }));
     }
   };
 
@@ -152,8 +151,8 @@ const Chat: React.FC<ChatProps> = ({
         ) : (
           messages.map((msg, index) => {
             const isSystem = msg.senderId === 'system';
-            const isMe = msg.senderId === myId || msg.senderId === 'local';
-            const isFile = msg.text.startsWith('[FILE]');
+            const isMe = msg.senderId === myId;
+            const fileMeta = parseFileMessage(msg.text);
 
             if (isSystem) {
               return (
@@ -163,55 +162,48 @@ const Chat: React.FC<ChatProps> = ({
               );
             }
 
-            // File Sharing Card Rendering
-            if (isFile) {
-              try {
-                // Parse format: [FILE]fileName|fileSize|fileType
-                const rawMeta = msg.text.substring(6);
-                const [fileName, fileSize, fileType] = rawMeta.split('|');
-                const isDownloading = !!downloadingFiles[fileName];
+            // File Sharing Card Rendering (falls through to plain text on malformed metadata)
+            if (fileMeta) {
+              const isDownloading = !!downloadingFiles[fileMeta.id];
 
-                return (
-                  <div key={index} className={`chat-bubble file-card-bubble ${isMe ? 'self' : 'other'}`}>
-                    {!isMe && (
-                      <span className="chat-sender-name">{msg.senderName}</span>
-                    )}
-                    <div className="chat-file-card">
-                      <div className="file-info-header">
-                        <FileText size={28} className="file-icon" />
-                        <div className="file-meta">
-                          <span className="file-name" title={fileName}>{fileName}</span>
-                          <span className="file-size">{formatBytes(fileSize)}</span>
-                        </div>
-                      </div>
-                      <div className="file-card-action">
-                        {isMe ? (
-                          <span className="file-status-sent">
-                            <Check size={12} style={{ marginRight: '4px' }} /> Gönderildi
-                          </span>
-                        ) : (
-                          <button 
-                            className={`btn-file-download ${isDownloading ? 'downloading' : ''}`}
-                            onClick={() => triggerDownload(msg.senderId, fileName, fileType)}
-                            disabled={isDownloading}
-                          >
-                            {isDownloading ? (
-                              <>İndiriliyor...</>
-                            ) : (
-                              <>
-                                <Download size={12} style={{ marginRight: '4px' }} /> P2P İndir
-                              </>
-                            )}
-                          </button>
-                        )}
+              return (
+                <div key={index} className={`chat-bubble file-card-bubble ${isMe ? 'self' : 'other'}`}>
+                  {!isMe && (
+                    <span className="chat-sender-name">{msg.senderName}</span>
+                  )}
+                  <div className="chat-file-card">
+                    <div className="file-info-header">
+                      <FileText size={28} className="file-icon" />
+                      <div className="file-meta">
+                        <span className="file-name" title={fileMeta.name}>{fileMeta.name}</span>
+                        <span className="file-size">{formatBytes(fileMeta.size)}</span>
                       </div>
                     </div>
-                    <span className="chat-time">{formatTime(msg.timestamp)}</span>
+                    <div className="file-card-action">
+                      {isMe ? (
+                        <span className="file-status-sent">
+                          <Check size={12} style={{ marginRight: '4px' }} /> Gönderildi
+                        </span>
+                      ) : (
+                        <button
+                          className={`btn-file-download ${isDownloading ? 'downloading' : ''}`}
+                          onClick={() => triggerDownload(msg.senderId, fileMeta)}
+                          disabled={isDownloading}
+                        >
+                          {isDownloading ? (
+                            <>İndiriliyor...</>
+                          ) : (
+                            <>
+                              <Download size={12} style={{ marginRight: '4px' }} /> P2P İndir
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                );
-              } catch (err) {
-                // fallback to regular message if format parsing fails
-              }
+                  <span className="chat-time">{formatTime(msg.timestamp)}</span>
+                </div>
+              );
             }
 
             return (
@@ -257,7 +249,7 @@ const Chat: React.FC<ChatProps> = ({
           placeholder="Mesajınızı yazın..."
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          maxLength={200}
+          maxLength={500}
         />
         <button type="submit" className="chat-send-btn">
           <Send size={16} />

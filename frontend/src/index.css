@@ -1118,6 +1118,66 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
+/* Non-fatal warning variant (rate limits, host actions etc.) */
+.toast-notification.warning {
+  border-color: #f59e0b;
+  box-shadow: 0 10px 30px rgba(245, 158, 11, 0.15);
+  bottom: 160px;
+}
+
+/* Viewer-side per-stream volume control (bottom-right of video cards) */
+.volume-control {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 5px 10px;
+  border-radius: 4px;
+  z-index: 15;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.video-card:hover .volume-control,
+.volume-control:focus-within {
+  opacity: 1;
+}
+
+.volume-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+}
+
+.volume-slider {
+  width: 70px;
+  height: 4px;
+  accent-color: var(--color-blue);
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  /* Always visible on touch devices — there is no hover */
+  .volume-control {
+    opacity: 1;
+    bottom: 8px;
+    right: 8px;
+    padding: 4px 8px;
+  }
+
+  .volume-slider {
+    width: 52px;
+  }
+}
+
 /* Speaking Active Video Card Glow */
 .video-card.speaking-active {
   box-shadow: 0 0 0 3px var(--color-green), 0 0 25px rgba(16, 185, 129, 0.4);

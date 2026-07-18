@@ -11,33 +11,15 @@ const socketHandler = require('./socketHandler');
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Enable Helmet middleware for secure HTTP headers
-app.use(helmet());
+// Required behind reverse proxies (Render, etc.) so express-rate-limit sees the real client IP.
+// Without this, express-rate-limit v7+ throws a ValidationError in production when
+// X-Forwarded-For is present, breaking /create-room entirely.
+app.set('trust proxy', 1);
 
-// Custom Content Security Policy (CSP) directive configurations for WebSockets & WebRTC
-app.use(
-  helmet.contentSecurityPolicy({
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      connectSrc: [
-        "'self'",
-        "ws://localhost:5000",
-        "http://localhost:5000",
-        "ws://127.0.0.1:5000",
-        "http://127.0.0.1:5000",
-        "http://localhost:5000/peer",
-        "ws://localhost:5000/peer",
-        "http://127.0.0.1:5000/peer",
-        "ws://127.0.0.1:5000/peer"
-      ],
-      mediaSrc: ["'self'", "blob:", "mediastream:"], // blob: and mediastream: are essential for WebRTC camera feeds
-      imgSrc: ["'self'", "data:", "blob:"]
-    }
-  })
-);
+// Enable Helmet middleware for secure HTTP headers.
+// The backend serves no HTML pages (frontend is deployed separately), so the default
+// CSP from Helmet is sufficient; hardcoded localhost connect-src directives were removed.
+app.use(helmet());
 
 // Whitelist origins for CORS (restrict from wildcard *)
 const allowedOrigins = [

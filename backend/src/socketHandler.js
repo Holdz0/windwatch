@@ -3,6 +3,9 @@ const {
   removeUserFromRoom,
   findRoomBySocketId,
   getRoomRaw,
+  setUserScreenShare,
+  setUserMediaState,
+  pushRoomMessage,
   toggleRoomLock
 } = require('./rooms');
 
@@ -17,58 +20,153 @@ function sanitize(input, maxLength) {
   return str.replace(/[\x00-\x1F\x7F-\x9F]/g, "");
 }
 
-// Simple in-memory rate limiting map for socket messages
-const messageLimits = new Map(); // socketId -> { count, resetTime }
-const MAX_MESSAGES_PER_WINDOW = 15; // Increased slightly to accommodate file shares
-const RATE_LIMIT_WINDOW_MS = 2000;
+// Generic sliding-window rate limiter keyed by socket ID
+function createRateLimiter(maxPerWindow, windowMs) {
+  const limits = new Map(); // socketId -> { count, resetTime }
+  return {
+    isLimited(socketId) {
+      const now = Date.now();
+      const limit = limits.get(socketId);
+      if (!limit || now > limit.resetTime) {
+        limits.set(socketId, { count: 1, resetTime: now + windowMs });
+        return false;
+      }
+      limit.count++;
+      return limit.count > maxPerWindow;
+    },
+    clear(socketId) {
+      limits.delete(socketId);
+    }
+  };
+}
 
-function isRateLimited(socketId) {
-  const now = Date.now();
-  if (!messageLimits.has(socketId)) {
-    messageLimits.set(socketId, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
-    return false;
-  }
-  
-  const limit = messageLimits.get(socketId);
-  if (now > limit.resetTime) {
-    limit.count = 1;
-    limit.resetTime = now + RATE_LIMIT_WINDOW_MS;
-    return false;
-  }
-  
-  limit.count++;
-  return limit.count > MAX_MESSAGES_PER_WINDOW;
+// 15 messages / 2s accommodates fast typing plus file shares
+const messageLimiter = createRateLimiter(15, 2000);
+// Join attempts are cheap lookups but the success path broadcasts to the room, so cap them too
+const joinLimiter = createRateLimiter(5, 10000);
+
+// Text messages are capped at 500 chars; file-offer metadata needs more headroom
+const MAX_TEXT_LENGTH = 500;
+const MAX_FILE_META_LENGTH = 1000;
+const FILE_MESSAGE_PREFIX = '[FILE]';
+
+function makeSystemMessage(text) {
+  return {
+    senderId: 'system',
+    senderName: 'Sistem',
+    text,
+    timestamp: new Date().toISOString()
+  };
 }
 
 module.exports = (io) => {
+  // Broadcasts a system message to a room and stores it in history
+  function broadcastSystemMessage(roomId, text) {
+    const room = getRoomRaw(roomId);
+    if (!room) return;
+    const systemMsg = makeSystemMessage(text);
+    pushRoomMessage(room, systemMsg);
+    io.to(roomId).emit('receive-message', systemMsg);
+  }
+
+  // Broadcasts the current users list to everyone in the room
+  function broadcastRoomUsers(roomId) {
+    const room = getRoomRaw(roomId);
+    if (!room) return;
+    io.to(roomId).emit('room-users', {
+      roomUsers: Array.from(room.users.values()),
+      hostSocketId: room.hostSocketId
+    });
+  }
+
+  // Removes a socket from its room and notifies remaining members
+  function leaveCurrentRoom(socket, { silent = false } = {}) {
+    const roomId = findRoomBySocketId(socket.id);
+    if (!roomId) return;
+
+    const room = getRoomRaw(roomId);
+    const user = room ? room.users.get(socket.id) : null;
+    const leftUsername = user ? user.username : 'Bir kullanıcı';
+
+    const { roomDeleted } = removeUserFromRoom(roomId, socket.id);
+    socket.leave(roomId);
+
+    socket.to(roomId).emit('user-disconnected', { socketId: socket.id });
+
+    if (!roomDeleted) {
+      broadcastRoomUsers(roomId);
+      if (!silent) {
+        broadcastSystemMessage(roomId, `${leftUsername} odadan ayrıldı.`);
+      }
+    } else {
+      console.log(`Room ${roomId} is now empty and has been deleted.`);
+    }
+  }
+
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
 
     // 1. Join Room Event
-    socket.on('join-room', ({ roomId, peerId, username, password }) => {
+    socket.on('join-room', ({ roomId, peerId, username, password } = {}) => {
+      if (joinLimiter.isLimited(socket.id)) {
+        return socket.emit('warning-msg', 'Çok sık oda değiştiriyorsunuz. Lütfen biraz bekleyin.');
+      }
+
       const cleanRoomId = sanitize(roomId, 100);
       const cleanPeerId = sanitize(peerId, 100);
       const cleanUsername = sanitize(username, 30);
+      const cleanPassword = typeof password === 'string' ? password.slice(0, 100) : null;
 
       if (!cleanRoomId || !cleanUsername) {
-        return socket.emit('error-msg', 'Room ID and username are required.');
+        return socket.emit('error-msg', 'Oda ID ve kullanıcı adı gereklidir.');
       }
 
-      // Check if room is locked or requires a password
+      // Rooms are only created via /create-room; joining an unknown ID is an error
+      // (previously this silently created a new room, bypassing passwords and rate limits)
       const room = getRoomRaw(cleanRoomId);
-      if (room) {
+      if (!room) {
+        return socket.emit('error-msg', 'Oda bulunamadı. Bağlantının süresi dolmuş veya oda kapatılmış olabilir.');
+      }
+
+      const alreadyInThisRoom = room.users.has(socket.id);
+
+      if (!alreadyInThisRoom) {
         if (room.isLocked) {
           return socket.emit('error-msg', 'Bu oda kilitli. Giriş yapamazsınız.');
         }
-        if (room.password && room.password !== password) {
+        if (room.password && room.password !== cleanPassword) {
           return socket.emit('password-required', { roomId: cleanRoomId });
         }
       }
 
+      // A socket may only be in one room at a time; leave any previous room first
+      const previousRoomId = findRoomBySocketId(socket.id);
+      if (previousRoomId && previousRoomId !== cleanRoomId) {
+        leaveCurrentRoom(socket);
+      }
+
+      if (alreadyInThisRoom) {
+        // Duplicate join (e.g. client retry): just resync state, don't re-announce
+        socket.emit('room-users', {
+          roomUsers: Array.from(room.users.values()),
+          hostSocketId: room.hostSocketId
+        });
+        socket.emit('room-history', room.messages || []);
+        return;
+      }
+
       console.log(`User ${cleanUsername} (${socket.id}) joining room ${cleanRoomId} with Peer ID ${cleanPeerId}`);
 
-      // Add to our in-memory room store
-      const { user, roomUsers, hostSocketId } = addUserToRoom(cleanRoomId, socket.id, cleanPeerId, cleanUsername);
+      const result = addUserToRoom(cleanRoomId, socket.id, cleanPeerId, cleanUsername);
+      if (!result) {
+        return socket.emit('error-msg', 'Oda bulunamadı. Bağlantının süresi dolmuş veya oda kapatılmış olabilir.');
+      }
+      const { user, roomUsers, hostSocketId, staleSocketIds } = result;
+
+      // Tell clients to clean up any stale entries from a previous socket of this peer
+      staleSocketIds.forEach((staleId) => {
+        io.to(cleanRoomId).emit('user-disconnected', { socketId: staleId });
+      });
 
       // Join the Socket.io room channel
       socket.join(cleanRoomId);
@@ -78,236 +176,156 @@ module.exports = (io) => {
         socketId: socket.id,
         peerId: user.peerId,
         username: user.username,
-        isHost: user.isHost
+        isHost: user.isHost,
+        isAudioMuted: user.isAudioMuted,
+        isVideoMuted: user.isVideoMuted
       });
 
-      // Send the current list of users and host details back to the client who just joined
-      socket.emit('room-users', {
-        roomUsers,
-        hostSocketId
-      });
+      // Sync the full users list to everyone (also clears stale entries client-side)
+      io.to(cleanRoomId).emit('room-users', { roomUsers, hostSocketId });
 
-      // Fetch the newly updated room to retrieve messages history
-      const updatedRoom = getRoomRaw(cleanRoomId);
-      if (updatedRoom) {
-        // Send messages history to the joined client
-        socket.emit('room-history', updatedRoom.messages || []);
-
-        // Broadcast a system message stating that the user has joined
-        const systemMsg = {
-          senderId: 'system',
-          senderName: 'Sistem',
-          text: `${cleanUsername} odaya katıldı.`,
-          timestamp: new Date().toISOString()
-        };
-        updatedRoom.messages.push(systemMsg);
-        if (updatedRoom.messages.length > 50) updatedRoom.messages.shift();
-        io.to(cleanRoomId).emit('receive-message', systemMsg);
-      }
+      // Send messages history to the joined client, then announce them
+      socket.emit('room-history', room.messages || []);
+      broadcastSystemMessage(cleanRoomId, `${cleanUsername} odaya katıldı.`);
     });
 
     // 2. Chat Message Event
-    socket.on('send-message', ({ roomId, text }) => {
-      if (isRateLimited(socket.id)) {
-        return socket.emit('error-msg', 'Çok hızlı mesaj gönderiyorsunuz. Lütfen biraz bekleyin.');
+    socket.on('send-message', ({ roomId, text } = {}) => {
+      if (messageLimiter.isLimited(socket.id)) {
+        return socket.emit('warning-msg', 'Çok hızlı mesaj gönderiyorsunuz. Lütfen biraz bekleyin.');
       }
       const cleanRoomId = sanitize(roomId, 100);
-      const cleanText = sanitize(text, 1000); // Allowed larger size for file metadata
+      const isFileMessage = typeof text === 'string' && text.startsWith(FILE_MESSAGE_PREFIX);
+      const cleanText = sanitize(text, isFileMessage ? MAX_FILE_META_LENGTH : MAX_TEXT_LENGTH);
 
       if (!cleanRoomId || !cleanText) return;
 
       const userRoomId = findRoomBySocketId(socket.id);
       // Security check: ensure the socket is actually in the room they are sending to
       if (userRoomId !== cleanRoomId) {
-        return socket.emit('error-msg', 'Unauthorized message room send.');
+        return socket.emit('warning-msg', 'Mesaj gönderilemedi: bu odada değilsiniz.');
       }
 
-      // Find the user's username
       const room = getRoomRaw(cleanRoomId);
       if (!room) return;
 
       const user = room.users.get(socket.id);
       const senderName = user ? user.username : 'Anonymous';
 
-      // Broadcast the message to all users in the room
       const newMessage = {
         senderId: socket.id,
         senderName,
         text: cleanText,
         timestamp: new Date().toISOString()
       };
-      
-      room.messages.push(newMessage);
-      if (room.messages.length > 50) room.messages.shift();
+
+      pushRoomMessage(room, newMessage);
       io.to(cleanRoomId).emit('receive-message', newMessage);
     });
 
-    // 2.5 Screen Share Toggle Event
-    socket.on('toggle-screen-share', ({ isSharing }) => {
+    // 2.4 Media (mute) State Sync Event
+    socket.on('media-state', ({ isAudioMuted, isVideoMuted } = {}) => {
       const roomId = findRoomBySocketId(socket.id);
-      if (roomId) {
-        const result = require('./rooms').setUserScreenShare(roomId, socket.id, isSharing);
-        if (result) {
-          io.to(roomId).emit('room-users', {
-            roomUsers: result.roomUsers,
-            hostSocketId: result.hostSocketId
-          });
-
-          // Broadcast system message about screen share status
-          const room = getRoomRaw(roomId);
-          if (room) {
-            const user = room.users.get(socket.id);
-            const username = user ? user.username : 'Bir kullanıcı';
-            const action = isSharing ? 'ekranını paylaşmaya başladı.' : 'ekran paylaşımını durdurdu.';
-            
-            const systemMsg = {
-              senderId: 'system',
-              senderName: 'Sistem',
-              text: `${username} ${action}`,
-              timestamp: new Date().toISOString()
-            };
-            
-            room.messages.push(systemMsg);
-            if (room.messages.length > 50) room.messages.shift();
-            io.to(roomId).emit('receive-message', systemMsg);
-          }
-        }
+      if (!roomId) return;
+      const result = setUserMediaState(roomId, socket.id, isAudioMuted, isVideoMuted);
+      if (result) {
+        io.to(roomId).emit('room-users', {
+          roomUsers: result.roomUsers,
+          hostSocketId: result.hostSocketId
+        });
       }
+    });
+
+    // 2.5 Screen Share Toggle Event
+    socket.on('toggle-screen-share', ({ isSharing } = {}) => {
+      const roomId = findRoomBySocketId(socket.id);
+      if (!roomId) return;
+
+      const result = setUserScreenShare(roomId, socket.id, !!isSharing);
+      if (!result) return;
+
+      io.to(roomId).emit('room-users', {
+        roomUsers: result.roomUsers,
+        hostSocketId: result.hostSocketId
+      });
+
+      const room = getRoomRaw(roomId);
+      const user = room ? room.users.get(socket.id) : null;
+      const username = user ? user.username : 'Bir kullanıcı';
+      const action = isSharing ? 'ekranını paylaşmaya başladı.' : 'ekran paylaşımını durdurdu.';
+      broadcastSystemMessage(roomId, `${username} ${action}`);
     });
 
     // 2.6 Toggle Room Lock Event (Host only)
     socket.on('toggle-lock-room', () => {
       const roomId = findRoomBySocketId(socket.id);
-      if (roomId) {
-        const newLockState = toggleRoomLock(roomId, socket.id);
-        if (newLockState !== null) {
-          // Tell all users in the room about the new lock state
-          io.to(roomId).emit('room-locked-status', { isLocked: newLockState });
+      if (!roomId) return;
 
-          // Add system message
-          const room = getRoomRaw(roomId);
-          if (room) {
-            const systemMsg = {
-              senderId: 'system',
-              senderName: 'Sistem',
-              text: `Oda kurucusu tarafından oda ${newLockState ? 'yeni girişlere kilitlendi' : 'girişlere açıldı'}.`,
-              timestamp: new Date().toISOString()
-            };
-            room.messages.push(systemMsg);
-            if (room.messages.length > 50) room.messages.shift();
-            io.to(roomId).emit('receive-message', systemMsg);
-          }
-        }
-      }
+      const newLockState = toggleRoomLock(roomId, socket.id);
+      if (newLockState === null) return;
+
+      io.to(roomId).emit('room-locked-status', { isLocked: newLockState });
+      broadcastSystemMessage(
+        roomId,
+        `Oda kurucusu tarafından oda ${newLockState ? 'yeni girişlere kilitlendi' : 'girişlere açıldı'}.`
+      );
     });
 
     // 2.7 Kick User Event (Host only)
-    socket.on('kick-user', ({ targetSocketId }) => {
+    socket.on('kick-user', ({ targetSocketId } = {}) => {
       const roomId = findRoomBySocketId(socket.id);
-      if (roomId) {
-        const room = getRoomRaw(roomId);
-        if (room && room.hostSocketId === socket.id && targetSocketId !== socket.id) {
-          const targetSocket = io.sockets.sockets.get(targetSocketId);
-          if (targetSocket) {
-            // Find target username for system message
-            const targetUser = room.users.get(targetSocketId);
-            const targetUsername = targetUser ? targetUser.username : 'Kullanıcı';
+      if (!roomId) return;
 
-            // Notify target client they are kicked
-            targetSocket.emit('kicked', 'Oda kurucusu tarafından odadan çıkarıldınız.');
-            
-            // Remove target client socket from the socket room
-            targetSocket.leave(roomId);
+      const room = getRoomRaw(roomId);
+      // Host-only, no self-kick, and the target must actually be in this host's room
+      if (!room || room.hostSocketId !== socket.id || targetSocketId === socket.id) return;
+      if (!room.users.has(targetSocketId)) return;
 
-            // Clean up room directly
-            const { roomDeleted, newHostSocketId, roomUsers } = removeUserFromRoom(roomId, targetSocketId);
-            
-            io.to(roomId).emit('user-disconnected', { socketId: targetSocketId });
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (!targetSocket) return;
 
-            if (!roomDeleted) {
-              io.to(roomId).emit('room-users', {
-                roomUsers,
-                hostSocketId: newHostSocketId
-              });
+      const targetUser = room.users.get(targetSocketId);
+      const targetUsername = targetUser ? targetUser.username : 'Kullanıcı';
 
-              // Add system message
-              const systemMsg = {
-                senderId: 'system',
-                senderName: 'Sistem',
-                text: `${targetUsername} odadan atıldı.`,
-                timestamp: new Date().toISOString()
-              };
-              room.messages.push(systemMsg);
-              if (room.messages.length > 50) room.messages.shift();
-              io.to(roomId).emit('receive-message', systemMsg);
-            }
+      // Notify target client they are kicked
+      targetSocket.emit('kicked', 'Oda kurucusu tarafından odadan çıkarıldınız.');
+      targetSocket.leave(roomId);
 
-            // Force disconnect the target socket connection
-            targetSocket.disconnect(true);
-          }
-        }
+      const { roomDeleted } = removeUserFromRoom(roomId, targetSocketId);
+
+      io.to(roomId).emit('user-disconnected', { socketId: targetSocketId });
+
+      if (!roomDeleted) {
+        broadcastRoomUsers(roomId);
+        broadcastSystemMessage(roomId, `${targetUsername} odadan atıldı.`);
       }
+
+      // Force disconnect the target socket connection
+      targetSocket.disconnect(true);
     });
 
     // 2.8 Remote Mute Request Event (Host only)
-    socket.on('mute-user-request', ({ targetSocketId, trackKind }) => {
+    socket.on('mute-user-request', ({ targetSocketId, trackKind } = {}) => {
+      if (trackKind !== 'audio' && trackKind !== 'video') return;
+
       const roomId = findRoomBySocketId(socket.id);
-      if (roomId) {
-        const room = getRoomRaw(roomId);
-        if (room && room.hostSocketId === socket.id) {
-          // Forward mute request to target user
-          io.to(targetSocketId).emit('mute-user-request', { trackKind });
-        }
-      }
+      if (!roomId) return;
+
+      const room = getRoomRaw(roomId);
+      // Host-only, and the target must be in the host's own room
+      // (previously any socketId in any room could be muted)
+      if (!room || room.hostSocketId !== socket.id) return;
+      if (!room.users.has(targetSocketId)) return;
+
+      io.to(targetSocketId).emit('mute-user-request', { trackKind });
     });
 
     // 3. User Disconnected Event
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.id}`);
-      messageLimits.delete(socket.id);
-
-      const roomId = findRoomBySocketId(socket.id);
-      if (roomId) {
-        // Fetch username before removing user from room
-        const room = getRoomRaw(roomId);
-        let leftUsername = 'Bir kullanıcı';
-        if (room) {
-          const user = room.users.get(socket.id);
-          if (user) leftUsername = user.username;
-        }
-
-        // Remove user from the room map
-        const { roomDeleted, newHostSocketId, roomUsers } = removeUserFromRoom(roomId, socket.id);
-
-        // Tell other users in the room that this user has disconnected
-        socket.to(roomId).emit('user-disconnected', { socketId: socket.id });
-
-        if (!roomDeleted) {
-          console.log(`User left room ${roomId}. Remaining users count: ${roomUsers.length}`);
-          
-          // If the host changed, notify the room
-          io.to(roomId).emit('room-users', {
-            roomUsers,
-            hostSocketId: newHostSocketId
-          });
-
-          // Add system message
-          const updatedRoom = getRoomRaw(roomId);
-          if (updatedRoom) {
-            const systemMsg = {
-              senderId: 'system',
-              senderName: 'Sistem',
-              text: `${leftUsername} odadan ayrıldı.`,
-              timestamp: new Date().toISOString()
-            };
-            updatedRoom.messages.push(systemMsg);
-            if (updatedRoom.messages.length > 50) updatedRoom.messages.shift();
-            io.to(roomId).emit('receive-message', systemMsg);
-          }
-        } else {
-          console.log(`Room ${roomId} is now empty and has been deleted.`);
-        }
-      }
+      messageLimiter.clear(socket.id);
+      joinLimiter.clear(socket.id);
+      leaveCurrentRoom(socket);
     });
   });
 };

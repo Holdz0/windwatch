@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  MicOff, VideoOff, Shield, Maximize, Minimize, 
-  Pin, Trash2, VolumeX, Tv, Activity 
+import {
+  MicOff, VideoOff, Shield, Maximize, Minimize,
+  Pin, Trash2, VolumeX, Volume1, Volume2, Tv, Activity
 } from 'lucide-react';
 import type { Participant } from './Room';
+import { getSharedAudioContext } from '../utils/audio';
 
 interface VideoGridProps {
   participants: Participant[];
@@ -47,8 +48,19 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
 
-  const hasVideo = p.stream && p.stream.getVideoTracks().length > 0 && p.stream.getVideoTracks()[0].enabled;
+  // Playback volume for this participant's stream (0..1), adjustable by the viewer.
+  // The last non-zero value is kept so the speaker toggle can restore it.
+  const [volume, setVolume] = useState(1);
+  const lastVolumeRef = useRef(1);
+
+  // isVideoMuted is synced over the server for remote users; a remote track's
+  // `enabled` flag is always true locally, so it can't be used to detect mute
+  // (it previously rendered a black rectangle instead of the avatar).
+  const hasVideo = !!p.stream && p.stream.getVideoTracks().length > 0 && !p.isVideoMuted;
   const isScreen = p.isScreenSharing;
+  // The media element must stay mounted even in avatar mode — remote audio only
+  // plays through this element, so unmounting it would silence the participant.
+  const showVideo = hasVideo || isScreen;
 
   // Render initials if camera is disabled
   const getInitials = (name: string) => {
@@ -61,14 +73,36 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       .slice(0, 2);
   };
 
-  // Bind WebRTC stream to video element
+  // Bind WebRTC stream to video element and make sure playback actually starts.
+  // Browsers can reject unmuted autoplay; when that happens the element stays
+  // paused and the participant is silent — retry on the next user gesture.
   useEffect(() => {
-    if (videoRef.current && p.stream) {
-      if (videoRef.current.srcObject !== p.stream) {
-        videoRef.current.srcObject = p.stream;
-      }
+    const videoEl = videoRef.current;
+    if (!videoEl || !p.stream) return;
+
+    if (videoEl.srcObject !== p.stream) {
+      videoEl.srcObject = p.stream;
     }
-  }, [p.stream]);
+
+    let retryListener: (() => void) | null = null;
+    videoEl.play().catch(() => {
+      retryListener = () => {
+        videoEl.play().catch(() => {});
+      };
+      document.addEventListener('click', retryListener, { once: true });
+    });
+
+    return () => {
+      if (retryListener) document.removeEventListener('click', retryListener);
+    };
+  }, [p.stream, showVideo]);
+
+  // Apply the viewer-selected volume to the media element
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = volume;
+    }
+  }, [volume, p.stream]);
 
   // Check for picture-in-picture API support
   useEffect(() => {
@@ -91,14 +125,14 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       return;
     }
 
-    let audioCtx: AudioContext | null = null;
     let analyser: AnalyserNode | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
     let animFrameId: number;
 
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      audioCtx = new AudioContextClass();
+      // Use the app-wide shared AudioContext — browsers cap concurrent contexts,
+      // and one per participant would exhaust the limit in crowded rooms.
+      const audioCtx = getSharedAudioContext();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
 
@@ -140,7 +174,8 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
     return () => {
       if (animFrameId) cancelAnimationFrame(animFrameId);
       if (source) source.disconnect();
-      if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
+      if (analyser) analyser.disconnect();
+      // The shared AudioContext is intentionally left open for other consumers
     };
   }, [p.stream, p.isAudioMuted]);
 
@@ -214,17 +249,57 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
         )}
       </div>
 
-      {/* Video element or Avatar placeholder */}
-      {p.stream && (hasVideo || isScreen) ? (
+      {/* Media element (always mounted while a stream exists — it carries the audio)
+          plus the Avatar placeholder when video is off */}
+      {p.stream && (
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted={isMe} // Mute self to prevent hearing echo
+          style={showVideo ? undefined : { display: 'none' }}
         />
-      ) : (
+      )}
+      {(!p.stream || !showVideo) && (
         <div className="avatar-placeholder">
           {getInitials(p.username)}
+        </div>
+      )}
+
+      {/* Viewer-side volume control for remote streams */}
+      {!isMe && p.stream && (
+        <div className="volume-control" onDoubleClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="volume-toggle-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (volume === 0) {
+                setVolume(lastVolumeRef.current || 1);
+              } else {
+                lastVolumeRef.current = volume;
+                setVolume(0);
+              }
+            }}
+            title={volume === 0 ? 'Sesi Aç' : 'Sesi Kapat'}
+          >
+            {volume === 0 ? <VolumeX size={14} /> : volume < 0.5 ? <Volume1 size={14} /> : <Volume2 size={14} />}
+          </button>
+          <input
+            type="range"
+            className="volume-slider"
+            min={0}
+            max={1}
+            step={0.05}
+            value={volume}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              setVolume(v);
+              if (v > 0) lastVolumeRef.current = v;
+            }}
+            title={`Ses: ${Math.round(volume * 100)}%`}
+          />
         </div>
       )}
 
