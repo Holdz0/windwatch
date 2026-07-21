@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import type { Participant } from './Room';
 import { getSharedAudioContext } from '../utils/audio';
+import { formatBitrate } from '../utils/screenShare';
+import type { ScreenShareStats } from '../utils/screenShare';
 
 interface VideoGridProps {
   participants: Participant[];
@@ -14,7 +16,15 @@ interface VideoGridProps {
   onKickUser?: (socketId: string) => void;
   onRemoteMute?: (socketId: string, trackKind: 'audio' | 'video') => void;
   hideThumbnails?: boolean;
+  /** Live outbound telemetry for our own screen share */
+  screenShareStats?: ScreenShareStats | null;
 }
+
+const LIMITATION_LABELS: Record<string, string> = {
+  bandwidth: 'Bant genişliği sınırlı',
+  cpu: 'İşlemci sınırlı',
+  other: 'Sınırlı'
+};
 
 // Sub-component to manage individual participant streams and hooks
 interface ParticipantCardProps {
@@ -29,6 +39,7 @@ interface ParticipantCardProps {
   onTogglePin: () => void;
   onKick: () => void;
   onRemoteMute: (trackKind: 'audio' | 'video') => void;
+  screenShareStats?: ScreenShareStats | null;
 }
 
 const ParticipantCard: React.FC<ParticipantCardProps> = ({
@@ -42,7 +53,8 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
   onToggleFullscreen,
   onTogglePin,
   onKick,
-  onRemoteMute
+  onRemoteMute,
+  screenShareStats
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -235,6 +247,32 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
         </div>
       )}
 
+      {/* Live telemetry for our own screen share — what viewers actually receive */}
+      {isMe && isScreen && screenShareStats && (
+        <div
+          className={`screen-stats-badge ${screenShareStats.limitation !== 'none' ? 'limited' : ''}`}
+          title={
+            screenShareStats.limitation !== 'none'
+              ? `Kodlayıcı kısıtlaması: ${LIMITATION_LABELS[screenShareStats.limitation] || screenShareStats.limitation}`
+              : 'Ekran paylaşımı sağlıklı gönderiliyor'
+          }
+        >
+          <Activity size={12} className="stats-icon" />
+          <span>
+            {screenShareStats.width > 0 ? `${screenShareStats.width}×${screenShareStats.height}` : '—'}
+            {' · '}
+            {screenShareStats.fps} fps
+            {' · '}
+            {formatBitrate(screenShareStats.kbps)}
+          </span>
+          {screenShareStats.limitation !== 'none' && (
+            <span className="screen-stats-warning">
+              {LIMITATION_LABELS[screenShareStats.limitation] || screenShareStats.limitation}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Audio/Video Mute status badges */}
       <div className="stream-status-indicators">
         {p.isAudioMuted && (
@@ -352,7 +390,8 @@ const VideoGrid: React.FC<VideoGridProps> = ({
   connectionStats,
   onKickUser,
   onRemoteMute,
-  hideThumbnails = false
+  hideThumbnails = false,
+  screenShareStats
 }) => {
   const [fullscreenSocketId, setFullscreenSocketId] = useState<string | null>(null);
   const [pinnedSocketId, setPinnedSocketId] = useState<string | null>(null);
@@ -418,6 +457,7 @@ const VideoGrid: React.FC<VideoGridProps> = ({
             onTogglePin={() => handleTogglePin(focusedUser.socketId)}
             onKick={() => onKickUser?.(focusedUser.socketId)}
             onRemoteMute={(trackKind) => onRemoteMute?.(focusedUser.socketId, trackKind)}
+            screenShareStats={screenShareStats}
           />
         </div>
         {otherUsers.length > 0 && !hideThumbnails && (
@@ -436,6 +476,7 @@ const VideoGrid: React.FC<VideoGridProps> = ({
                 onTogglePin={() => handleTogglePin(p.socketId)}
                 onKick={() => onKickUser?.(p.socketId)}
                 onRemoteMute={(trackKind) => onRemoteMute?.(p.socketId, trackKind)}
+                screenShareStats={screenShareStats}
               />
             ))}
           </div>
@@ -461,6 +502,7 @@ const VideoGrid: React.FC<VideoGridProps> = ({
           onTogglePin={() => handleTogglePin(p.socketId)}
           onKick={() => onKickUser?.(p.socketId)}
           onRemoteMute={(trackKind) => onRemoteMute?.(p.socketId, trackKind)}
+          screenShareStats={screenShareStats}
         />
       ))}
     </div>

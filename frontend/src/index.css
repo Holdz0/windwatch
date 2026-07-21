@@ -1125,6 +1125,142 @@ body {
   bottom: 160px;
 }
 
+/* Screen share quality selector popover */
+.quality-menu-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.ctrl-btn.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.quality-menu {
+  position: absolute;
+  bottom: calc(100% + 14px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.55);
+  padding: 8px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quality-menu-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  padding: 6px 8px 4px;
+}
+
+.quality-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--color-text-primary);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.quality-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.quality-option.selected {
+  border-color: var(--color-blue);
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.quality-option-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.quality-option-hint {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  line-height: 1.35;
+}
+
+.quality-option-specs {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  font-family: monospace;
+  margin-top: 2px;
+}
+
+.quality-menu-footer {
+  font-size: 0.68rem;
+  color: var(--color-text-muted);
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--border-glass);
+  margin-top: 2px;
+}
+
+/* Live outbound telemetry badge shown to the person sharing their screen.
+   Top-centre keeps it clear of the action buttons (top-left) and the
+   mute / connection badges (top-right). */
+.screen-stats-badge {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-glass);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 0.7rem;
+  font-family: monospace;
+  color: var(--color-text-secondary);
+  z-index: 16;
+  pointer-events: none;
+  flex-wrap: wrap;
+  max-width: calc(100% - 24px);
+}
+
+.screen-stats-badge.limited {
+  border-color: #f59e0b;
+  color: #fbbf24;
+}
+
+.screen-stats-warning {
+  font-family: inherit;
+  font-size: 0.66rem;
+  opacity: 0.9;
+}
+
+@media (max-width: 640px) {
+  .quality-menu {
+    width: 240px;
+  }
+
+  .screen-stats-badge {
+    top: 8px;
+    font-size: 0.62rem;
+    padding: 4px 8px;
+  }
+}
+
 /* Viewer-side per-stream volume control (bottom-right of video cards) */
 .volume-control {
   position: absolute;

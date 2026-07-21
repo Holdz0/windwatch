@@ -12,6 +12,16 @@ import {
   stopMediaTrack,
   getSharedAudioContext
 } from '../utils/audio';
+import {
+  SCREEN_SHARE_PRESETS,
+  DEFAULT_SCREEN_QUALITY,
+  MIN_SCREEN_BITRATE,
+  CAMERA_ENCODING,
+  buildDisplayMediaConstraints,
+  applyVideoEncoding,
+  screenEncodingFor
+} from '../utils/screenShare';
+import type { ScreenShareQuality, ScreenShareStats } from '../utils/screenShare';
 
 interface RoomProps {
   roomId: string;
@@ -131,6 +141,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(true);
 
+  // Screen share tuning: the preset drives capture constraints and encoder behaviour,
+  // and the live stats let the sharer see what viewers are actually receiving.
+  const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
+  const [screenShareStats, setScreenShareStats] = useState<ScreenShareStats | null>(null);
+
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const handleResize = () => {
@@ -175,6 +190,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const peerRef = useRef<Peer | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+
+  // Screen share encoder state, kept in refs so the stats loop and late-joiner
+  // call setup can read the current values without re-subscribing.
+  const screenQualityRef = useRef<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
+  useEffect(() => {
+    screenQualityRef.current = screenQuality;
+  }, [screenQuality]);
+
+  // Bitrate actually in use — adapted downwards when the network can't keep up
+  const activeBitrateRef = useRef<number>(SCREEN_SHARE_PRESETS[DEFAULT_SCREEN_QUALITY].maxBitrate);
+  const prevOutboundRef = useRef<{ bytes: number; timestamp: number } | null>(null);
 
   // Mic + system audio mixer nodes on the shared AudioContext
   const mixerRef = useRef<{
@@ -293,6 +319,41 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     });
   };
 
+  const getVideoSender = (call: any): RTCRtpSender | undefined => {
+    if (!call || !call.peerConnection) return undefined;
+    return call.peerConnection
+      .getSenders()
+      .find((s: RTCRtpSender) => s.track && s.track.kind === 'video');
+  };
+
+  // Applies the current screen-share encoder profile to one call.
+  // A freshly created PeerJS call may not have its senders yet, so retry briefly —
+  // without this, anyone joining mid-share received the default (low) bitrate.
+  const applyScreenEncodingToCall = (call: any, attempt = 0) => {
+    if (!screenStreamRef.current) return;
+
+    const sender = getVideoSender(call);
+    if (!sender) {
+      if (attempt < 10) setTimeout(() => applyScreenEncodingToCall(call, attempt + 1), 400);
+      return;
+    }
+
+    const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+    applyVideoEncoding(sender, screenEncodingFor(preset, activeBitrateRef.current));
+  };
+
+  const applyScreenEncodingToAllCalls = () => {
+    Object.values(activeCalls.current).forEach((call: any) => applyScreenEncodingToCall(call));
+  };
+
+  // Restores the modest camera profile on every call when a share ends
+  const restoreCameraEncoding = () => {
+    Object.values(activeCalls.current).forEach((call: any) => {
+      const sender = getVideoSender(call);
+      if (sender) applyVideoEncoding(sender, CAMERA_ENCODING);
+    });
+  };
+
   const teardownMixer = () => {
     const m = mixerRef.current;
     if (m) {
@@ -386,6 +447,16 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
       const statsMap: Record<string, { rtt: number; packetLoss: number }> = {};
 
+      // Aggregated outbound telemetry for an active screen share
+      const isSharing = !!screenStreamRef.current;
+      let outWidth = 0;
+      let outHeight = 0;
+      let outFps = 0;
+      let outBytes = 0;
+      let outTimestamp = 0;
+      let limitation = 'none';
+      let sawOutbound = false;
+
       for (const [socketId, call] of calls) {
         if (call && call.peerConnection) {
           try {
@@ -404,6 +475,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                 const packetsReceived = report.packetsReceived || 1;
                 packetLoss = Math.round((packetsLost / (packetsLost + packetsReceived)) * 100);
               }
+              // Outbound video: what viewers are actually being sent right now
+              if (isSharing && report.type === 'outbound-rtp' && (report.kind || report.mediaType) === 'video') {
+                sawOutbound = true;
+                outWidth = Math.max(outWidth, report.frameWidth || 0);
+                outHeight = Math.max(outHeight, report.frameHeight || 0);
+                outFps = Math.max(outFps, Math.round(report.framesPerSecond || 0));
+                outBytes += report.bytesSent || 0;
+                outTimestamp = Math.max(outTimestamp, report.timestamp || 0);
+                const reason = report.qualityLimitationReason;
+                if (reason && reason !== 'none') limitation = reason;
+              }
             });
 
             statsMap[socketId] = { rtt, packetLoss };
@@ -414,9 +496,48 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       }
 
       setConnectionStats(statsMap);
+
+      if (!isSharing) {
+        setScreenShareStats(prev => (prev ? null : prev));
+        prevOutboundRef.current = null;
+      } else if (sawOutbound) {
+        // bytes * 8 / milliseconds is already kilobits per second
+        const prev = prevOutboundRef.current;
+        let kbps = 0;
+        if (prev && outTimestamp > prev.timestamp) {
+          kbps = ((outBytes - prev.bytes) * 8) / (outTimestamp - prev.timestamp);
+        }
+        prevOutboundRef.current = { bytes: outBytes, timestamp: outTimestamp };
+
+        setScreenShareStats({
+          width: outWidth,
+          height: outHeight,
+          fps: outFps,
+          kbps: Math.max(0, Math.round(kbps)),
+          limitation
+        });
+
+        // Adaptive bitrate: back off when the network is the bottleneck, then
+        // creep back up once the encoder stops reporting a limitation.
+        const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+        const current = activeBitrateRef.current;
+        let next = current;
+
+        if (limitation === 'bandwidth') {
+          next = Math.max(MIN_SCREEN_BITRATE, Math.round(current * 0.75));
+        } else if (limitation === 'none' && current < preset.maxBitrate) {
+          next = Math.min(preset.maxBitrate, Math.round(current * 1.15));
+        }
+
+        if (Math.abs(next - current) / current > 0.05) {
+          activeBitrateRef.current = next;
+          applyScreenEncodingToAllCalls();
+        }
+      }
     }, 4000);
 
     return () => clearInterval(statsTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -647,6 +768,13 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
             // Store call
             activeCalls.current[socketId] = call;
+
+            // If a screen share is already running, this new peer must get the
+            // screen-share encoder profile too — otherwise late joiners see a
+            // blurry, low-bitrate version of the share.
+            if (screenStreamRef.current) {
+              applyScreenEncodingToCall(call);
+            }
           }
         });
 
@@ -878,88 +1006,158 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
   // Screen Sharing logic: requests display stream and updates the tracks inside active peer calls
   const toggleScreenShare = async () => {
-    if (!isScreenSharing) {
-      try {
-        // High quality screen sharing constraints (ideal 30fps, max 60fps, 1080p limit)
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { max: 1920 },
-            height: { max: 1080 },
-            frameRate: { ideal: 30, max: 60 }
-          },
-          audio: true // Ask user to share system audio
-        });
-        screenStreamRef.current = stream;
-
-        const videoTrack = stream.getVideoTracks()[0];
-        if (videoTrack && 'contentHint' in videoTrack) {
-          videoTrack.contentHint = 'motion'; // Optimize encoder for motion rendering (high FPS)
-        }
-
-        // Mix system audio with microphone if the screen stream has audio
-        const mixedAudioTrack = buildMixer();
-        if (mixedAudioTrack) {
-          console.log('System audio mixed successfully with microphone.');
-        }
-
-        // Replace tracks in all active P2P calls
-        Object.values(activeCalls.current).forEach(async (call: any) => {
-          const senders = call.peerConnection.getSenders();
-
-          // Replace video track
-          const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-          if (videoSender && videoTrack) {
-            await videoSender.replaceTrack(videoTrack);
-
-            // Adjust encoding parameters for high-priority 4 Mbps screen share
-            try {
-              const params = videoSender.getParameters();
-              if (params.encodings && params.encodings.length > 0) {
-                params.encodings[0].maxBitrate = 4000000; // 4 Mbps (crisp resolution)
-                params.encodings[0].priority = 'high';
-                params.encodings[0].networkPriority = 'high';
-                await videoSender.setParameters(params);
-              }
-            } catch (pErr) {
-              console.warn("Failed to set video sender parameters:", pErr);
-            }
-          }
-
-          // Replace audio track with mixed stream if available
-          if (mixedAudioTrack) {
-            const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-            if (audioSender) {
-              await audioSender.replaceTrack(mixedAudioTrack);
-            }
-          }
-        });
-
-        setIsScreenSharing(true);
-        updateLocalParticipant({ isScreenSharing: true, stream: getActiveStream() });
-
-        socketRef.current?.emit('toggle-screen-share', { isSharing: true });
-
-        // Listen for user stopping screen share via browser bar
-        videoTrack.onended = () => {
-          stopScreenSharing();
-        };
-
-      } catch (err) {
-        console.error('Ekran paylaşımı başarısız oldu:', err);
-      }
-    } else {
+    if (isScreenSharing) {
       stopScreenSharing();
+      return;
     }
+
+    const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+    let stream: MediaStream;
+
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia(
+        buildDisplayMediaConstraints(preset) as any
+      );
+    } catch (err: any) {
+      // The user cancelling the picker also lands here — never treat that as a failure
+      if (err?.name === 'NotAllowedError' || err?.name === 'AbortError') {
+        return;
+      }
+      // Some browsers reject the richer constraint set (extra hints, audio constraints);
+      // fall back to the minimal form rather than losing screen sharing entirely.
+      console.warn('Gelişmiş ekran yakalama kısıtları reddedildi, temel ayarlara dönülüyor:', err);
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (fallbackErr: any) {
+        if (fallbackErr?.name !== 'NotAllowedError' && fallbackErr?.name !== 'AbortError') {
+          console.error('Ekran paylaşımı başlatılamadı:', fallbackErr);
+          showWarning('Ekran paylaşımı başlatılamadı.');
+        }
+        return;
+      }
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+
+    // The server enforces a single active sharer; ask before we rewire anything
+    const ack: any = await new Promise((resolve) => {
+      const socket = socketRef.current;
+      if (!socket) return resolve({ ok: false, reason: 'no-socket' });
+      const timer = setTimeout(() => resolve({ ok: true, timedOut: true }), 4000);
+      socket.emit('toggle-screen-share', { isSharing: true }, (response: any) => {
+        clearTimeout(timer);
+        resolve(response || { ok: true });
+      });
+    });
+
+    if (!ack.ok) {
+      // Denied (someone else is sharing) — release the capture we just took
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+
+    screenStreamRef.current = stream;
+    activeBitrateRef.current = preset.maxBitrate;
+    prevOutboundRef.current = null;
+
+    if ('contentHint' in videoTrack) {
+      videoTrack.contentHint = preset.contentHint;
+    }
+
+    // Mix system audio with microphone if the screen stream has audio
+    const mixedAudioTrack = buildMixer();
+    if (mixedAudioTrack) {
+      console.log('System audio mixed successfully with microphone.');
+    }
+
+    // Swap tracks + encoder profile on every active call
+    await Promise.all(
+      Object.values(activeCalls.current).map(async (call: any) => {
+        const senders = call.peerConnection.getSenders();
+
+        const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
+        if (videoSender) {
+          await videoSender.replaceTrack(videoTrack);
+          await applyVideoEncoding(videoSender, screenEncodingFor(preset, preset.maxBitrate));
+        }
+
+        if (mixedAudioTrack) {
+          const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
+          if (audioSender) await audioSender.replaceTrack(mixedAudioTrack);
+        }
+      })
+    );
+
+    setIsScreenSharing(true);
+    updateLocalParticipant({ isScreenSharing: true, stream: getActiveStream() });
+
+    // Stopping via the browser's own "Stop sharing" bar
+    videoTrack.onended = () => {
+      stopScreenSharing();
+    };
+
+    // Losing just the system-audio track (e.g. switching surfaces) must not kill
+    // the share — rebuild the mixer so the microphone keeps flowing.
+    const screenAudioTrack = stream.getAudioTracks()[0];
+    if (screenAudioTrack) {
+      screenAudioTrack.onended = () => {
+        if (!screenStreamRef.current) return;
+        buildMixer();
+        const fallback =
+          audioDestinationRef.current?.stream.getAudioTracks()[0] ||
+          localStreamRef.current?.getAudioTracks()[0];
+        if (fallback) replaceAudioSenders(fallback);
+      };
+    }
+  };
+
+  // Switching quality mid-share: re-negotiate capture constraints and encoder profile
+  // in place, so the viewer never loses the stream.
+  const changeScreenQuality = async (quality: ScreenShareQuality) => {
+    setScreenQuality(quality);
+    screenQualityRef.current = quality;
+
+    const preset = SCREEN_SHARE_PRESETS[quality];
+    activeBitrateRef.current = preset.maxBitrate;
+
+    const stream = screenStreamRef.current;
+    if (!stream) return; // Not sharing yet — the preset applies at capture time
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      if ('contentHint' in videoTrack) videoTrack.contentHint = preset.contentHint;
+      try {
+        await videoTrack.applyConstraints({
+          width: { max: preset.maxWidth },
+          height: { max: preset.maxHeight },
+          frameRate: { ideal: preset.frameRate, max: preset.frameRate }
+        });
+      } catch (err) {
+        // The capture source may refuse to change; the encoder caps below still apply
+        console.warn('Ekran yakalama kısıtları güncellenemedi:', err);
+      }
+    }
+
+    applyScreenEncodingToAllCalls();
   };
 
   const stopScreenSharing = () => {
     if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current.getTracks().forEach(track => {
+        track.onended = null;
+        track.stop();
+      });
       screenStreamRef.current = null;
     }
 
     // Tear down the audio mixer
     teardownMixer();
+    setScreenShareStats(null);
+    prevOutboundRef.current = null;
 
     if (localStreamRef.current) {
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
@@ -973,19 +1171,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
         if (videoSender && videoTrack) {
           await videoSender.replaceTrack(videoTrack);
-
-          // Revert encoding parameters back to standard values
-          try {
-            const params = videoSender.getParameters();
-            if (params.encodings && params.encodings.length > 0) {
-              params.encodings[0].maxBitrate = 1500000; // Standard 1.5 Mbps camera
-              params.encodings[0].priority = 'low';
-              params.encodings[0].networkPriority = 'low';
-              await videoSender.setParameters(params);
-            }
-          } catch (pErr) {
-            console.warn(pErr);
-          }
+          await applyVideoEncoding(videoSender, CAMERA_ENCODING);
         }
 
         // Revert audio track to microphone
@@ -994,6 +1180,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           await audioSender.replaceTrack(audioTrack);
         }
       });
+    } else {
+      restoreCameraEncoding();
     }
 
     setIsScreenSharing(false);
@@ -1158,6 +1346,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const hasActiveScreenShare = participants.some(p => p.isScreenSharing);
   const showMobileScreenShareChat = isMobile && hasActiveScreenShare && isChatOpen && !pipWindow;
 
+  // Only one member can share at a time; surface who is holding it
+  const remoteSharer = participants.find(p => p.isScreenSharing && p.socketId !== 'local');
+
   const localIsHost = participants.find(p => p.socketId === 'local')?.isHost || (hostSocketId && socketRef.current?.id === hostSocketId);
 
   return (
@@ -1238,6 +1429,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
             onKickUser={handleKickUser}
             onRemoteMute={handleRemoteMute}
             hideThumbnails={showMobileScreenShareChat}
+            screenShareStats={screenShareStats}
           />
           {showMobileScreenShareChat && (
             <div className="mobile-chat-container">
@@ -1265,6 +1457,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           toggleScreenShare={toggleScreenShare}
           toggleChat={() => setIsChatOpen(!isChatOpen)}
           onLeave={onLeave}
+          screenQuality={screenQuality}
+          onChangeScreenQuality={changeScreenQuality}
+          screenShareBlockedBy={remoteSharer?.username}
         />
       </div>
 

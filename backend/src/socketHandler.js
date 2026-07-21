@@ -236,21 +236,43 @@ module.exports = (io) => {
       }
     });
 
-    // 2.5 Screen Share Toggle Event
-    socket.on('toggle-screen-share', ({ isSharing } = {}) => {
+    // 2.5 Screen Share Toggle Event.
+    // Acknowledged, because only one member may share at a time and the client
+    // has to stop its already-captured display stream when it loses the race.
+    socket.on('toggle-screen-share', ({ isSharing } = {}, ack) => {
+      const respond = (payload) => {
+        if (typeof ack === 'function') ack(payload);
+      };
+
       const roomId = findRoomBySocketId(socket.id);
-      if (!roomId) return;
+      if (!roomId) return respond({ ok: false, reason: 'no-room' });
+
+      const room = getRoomRaw(roomId);
+      if (!room) return respond({ ok: false, reason: 'no-room' });
+
+      if (isSharing) {
+        const otherSharer = Array.from(room.users.values())
+          .find((u) => u.socketId !== socket.id && u.isScreenSharing);
+        if (otherSharer) {
+          socket.emit(
+            'warning-msg',
+            `${otherSharer.username} şu anda ekranını paylaşıyor. Paylaşımı bitmeden yeni paylaşım başlatamazsınız.`
+          );
+          return respond({ ok: false, reason: 'busy', sharerName: otherSharer.username });
+        }
+      }
 
       const result = setUserScreenShare(roomId, socket.id, !!isSharing);
-      if (!result) return;
+      if (!result) return respond({ ok: false, reason: 'no-room' });
+
+      respond({ ok: true });
 
       io.to(roomId).emit('room-users', {
         roomUsers: result.roomUsers,
         hostSocketId: result.hostSocketId
       });
 
-      const room = getRoomRaw(roomId);
-      const user = room ? room.users.get(socket.id) : null;
+      const user = room.users.get(socket.id);
       const username = user ? user.username : 'Bir kullanıcı';
       const action = isSharing ? 'ekranını paylaşmaya başladı.' : 'ekran paylaşımını durdurdu.';
       broadcastSystemMessage(roomId, `${username} ${action}`);
