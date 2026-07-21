@@ -146,6 +146,32 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
   const [screenShareStats, setScreenShareStats] = useState<ScreenShareStats | null>(null);
 
+  // Immersive landscape stage.
+  // Turning a phone sideways during a screen share used to keep the 64px header and
+  // 80px control bar, which eat ~40% of a ~375px-tall viewport. When the viewport is
+  // short and landscape we hand the whole screen to the stream and let the chrome
+  // auto-hide, the way a video player does.
+  const [isShortLandscape, setIsShortLandscape] = useState(false);
+  const [isChromeHidden, setIsChromeHidden] = useState(false);
+  const chromeTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(orientation: landscape) and (max-height: 550px)');
+    const update = () => setIsShortLandscape(mq.matches);
+    update();
+    // The matchMedia 'change' event alone is not dependable across mobile
+    // browsers when a device is rotated, so resize/orientationchange are used
+    // as belt-and-braces — all three funnel into the same evaluation.
+    mq.addEventListener('change', update);
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
+    return () => {
+      mq.removeEventListener('change', update);
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
+    };
+  }, []);
+
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     const handleResize = () => {
@@ -1346,13 +1372,48 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const hasActiveScreenShare = participants.some(p => p.isScreenSharing);
   const showMobileScreenShareChat = isMobile && hasActiveScreenShare && isChatOpen && !pipWindow;
 
+  // A phone held sideways while someone is sharing gets the full-bleed player layout
+  const isImmersiveStage = isShortLandscape && hasActiveScreenShare && !pipWindow;
+
+  // Show the chrome briefly when the stage takes over so the controls stay
+  // discoverable, then fade it away.
+  useEffect(() => {
+    if (chromeTimerRef.current) window.clearTimeout(chromeTimerRef.current);
+
+    if (!isImmersiveStage) {
+      setIsChromeHidden(false);
+      return;
+    }
+
+    setIsChromeHidden(false);
+    chromeTimerRef.current = window.setTimeout(() => setIsChromeHidden(true), 2500);
+
+    return () => {
+      if (chromeTimerRef.current) window.clearTimeout(chromeTimerRef.current);
+    };
+  }, [isImmersiveStage]);
+
+  // Tapping the stage toggles the chrome, like tapping a video player
+  const handleStageTap = () => {
+    if (!isImmersiveStage) return;
+    if (chromeTimerRef.current) window.clearTimeout(chromeTimerRef.current);
+
+    setIsChromeHidden(prev => {
+      const next = !prev;
+      if (!next) {
+        chromeTimerRef.current = window.setTimeout(() => setIsChromeHidden(true), 3500);
+      }
+      return next;
+    });
+  };
+
   // Only one member can share at a time; surface who is holding it
   const remoteSharer = participants.find(p => p.isScreenSharing && p.socketId !== 'local');
 
   const localIsHost = participants.find(p => p.socketId === 'local')?.isHost || (hostSocketId && socketRef.current?.id === hostSocketId);
 
   return (
-    <div className="room-container">
+    <div className={`room-container${isImmersiveStage ? ' immersive-stage' : ''}${isImmersiveStage && isChromeHidden ? ' chrome-hidden' : ''}`}>
       {/* Toast notifications — stacked so they never overlap or leave a gap */}
       <div className="toast-stack" aria-live="polite">
         {showCopiedToast && (
@@ -1422,7 +1483,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         </header>
 
         {/* Video stream feeds workspace */}
-        <div className={`video-workspace ${showMobileScreenShareChat ? 'mobile-ss-chat-active' : ''}`}>
+        <div
+          className={`video-workspace ${showMobileScreenShareChat ? 'mobile-ss-chat-active' : ''}`}
+          onClick={handleStageTap}
+        >
           <VideoGrid
             participants={participants}
             hostSocketId={hostSocketId}

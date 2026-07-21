@@ -2020,3 +2020,160 @@ body {
     transform: none !important;
   }
 }
+
+
+/* ==========================================================================
+   Immersive landscape stage.
+   Activated from Room.tsx when the viewport is short + landscape (a phone held
+   sideways) and someone is sharing their screen. The header and control bar
+   stop consuming layout height and float over the stream instead, auto-hiding
+   so the share is watched like a full-screen video.
+   ========================================================================== */
+
+.room-container.immersive-stage .main-screen {
+  position: relative;
+}
+
+/* Chrome floats over the stage rather than taking a row in the column layout */
+.room-container.immersive-stage .room-header,
+.room-container.immersive-stage .controls-container {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: none;
+  transition: opacity 0.25s ease, transform 0.3s var(--ease-out);
+}
+
+.room-container.immersive-stage .room-header {
+  top: 0;
+  height: 52px;
+}
+
+.room-container.immersive-stage .controls-container {
+  bottom: 0;
+  height: 60px;
+  gap: 14px;
+}
+
+.room-container.immersive-stage .ctrl-btn {
+  width: 38px;
+  height: 38px;
+}
+
+.room-container.immersive-stage .ctrl-btn svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* Hidden state — slides away, like a video player's controls */
+.room-container.chrome-hidden .room-header {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+}
+
+.room-container.chrome-hidden .controls-container {
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+}
+
+/* The stage itself fills the viewport edge to edge */
+.room-container.immersive-stage .video-workspace {
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.room-container.immersive-stage .screen-share-layout {
+  gap: 0;
+}
+
+/* Secondary participants are dropped — the shared screen is the point */
+.room-container.immersive-stage .thumbnails-strip-container {
+  display: none;
+}
+
+.room-container.immersive-stage .focused-stream-container .video-card {
+  border: none;
+  border-radius: 0;
+  background: var(--bg-primary);
+  box-shadow: none;
+  animation: none;
+}
+
+/* Letterbox rather than crop, so no part of the shared screen is cut off */
+.room-container.immersive-stage .focused-stream-container .video-card video {
+  object-fit: contain;
+}
+
+/* Touch devices have no hover, so card overlays are shown outright while the
+   chrome is visible (the ≤640px rules do not match a sideways phone, which
+   reports a width of ~800px). */
+.room-container.immersive-stage .volume-control,
+.room-container.immersive-stage .moderator-card-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.room-container.immersive-stage .volume-control {
+  transform: none;
+}
+
+/* Everything fades together when the chrome hides */
+.room-container.immersive-stage.chrome-hidden .card-top-left-actions,
+.room-container.immersive-stage.chrome-hidden .card-top-right-stack,
+.room-container.immersive-stage.chrome-hidden .user-tag,
+.room-container.immersive-stage.chrome-hidden .volume-control,
+.room-container.immersive-stage.chrome-hidden .moderator-card-controls,
+.room-container.immersive-stage.chrome-hidden .screen-stats-badge {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+/* Chat overlays the stage instead of squeezing it */
+.room-container.immersive-stage .chat-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  height: 100dvh;
+  width: min(320px, 55vw);
+  z-index: 100;
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.55);
+}
+
+.room-container.immersive-stage .chat-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 99;
+}
+
+/* Compact the chat for the short viewport */
+.room-container.immersive-stage .chat-header {
+  padding: 12px 16px;
+}
+
+.room-container.immersive-stage .chat-messages {
+  padding: 12px 16px;
+  gap: 12px;
+}
+
+.room-container.immersive-stage .chat-input-form {
+  padding: 10px 16px;
+}
+
+/* Toasts clear the floating control bar */
+.room-container.immersive-stage .toast-stack {
+  bottom: 72px;
+}
