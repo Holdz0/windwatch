@@ -95,6 +95,39 @@ export function buildDisplayMediaConstraints(preset: ScreenSharePreset): MediaSt
   } as MediaStreamConstraints;
 }
 
+export type DisplaySurface = 'browser' | 'window' | 'monitor' | 'unknown';
+
+/** Reads which kind of surface the user picked in the browser's share dialog. */
+export function getDisplaySurface(track: MediaStreamTrack): DisplaySurface {
+  const settings = track.getSettings() as { displaySurface?: string };
+  const surface = settings.displaySurface;
+  if (surface === 'browser' || surface === 'window' || surface === 'monitor') {
+    return surface;
+  }
+  return 'unknown';
+}
+
+/**
+ * Whether the audio captured alongside this surface is safe to mix into our
+ * outgoing stream.
+ *
+ * Screen ("monitor") and window captures take the machine's entire audio output,
+ * which includes the other participants' voices being played on this machine.
+ * Mixing that sends everyone their own voice back — a feedback loop the remote
+ * side hears as an echo of themselves.
+ *
+ * Tab ("browser") audio is scoped to the captured tab, and the picker already
+ * excludes our own tab via selfBrowserSurface, so it cannot contain the call.
+ * An undetermined surface is treated as unsafe: a silent share is a far smaller
+ * problem than an echo that makes the room unusable for everyone.
+ */
+export function canMixSystemAudio(surface: DisplaySurface): boolean {
+  return surface === 'browser';
+}
+
+export const SYSTEM_AUDIO_ECHO_WARNING =
+  'Sistem sesi paylaşılmadı: tüm ekran paylaşımında diğer katılımcılar kendi seslerini yankı olarak duyar. Ses de paylaşmak için tek bir sekme paylaşın.';
+
 export interface VideoEncodingOptions {
   maxBitrate: number;
   maxFramerate?: number;

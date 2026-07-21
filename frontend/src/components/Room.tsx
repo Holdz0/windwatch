@@ -19,7 +19,10 @@ import {
   CAMERA_ENCODING,
   buildDisplayMediaConstraints,
   applyVideoEncoding,
-  screenEncodingFor
+  screenEncodingFor,
+  getDisplaySurface,
+  canMixSystemAudio,
+  SYSTEM_AUDIO_ECHO_WARNING
 } from '../utils/screenShare';
 import type { ScreenShareQuality, ScreenShareStats } from '../utils/screenShare';
 
@@ -966,7 +969,16 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     if (isAudioMuted) {
       // Turn on microphone
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Echo cancellation is requested explicitly rather than left to the
+        // browser default: without it the mic picks the other participants back
+        // up from this machine's speakers and returns it to them.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
         const realAudioTrack = stream.getAudioTracks()[0];
         if (!realAudioTrack) return;
 
@@ -1084,6 +1096,20 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       // Denied (someone else is sharing) — release the capture we just took
       stream.getTracks().forEach(t => t.stop());
       return;
+    }
+
+    // Drop system audio that would feed the call back to the people in it.
+    // Capturing a whole screen takes the machine's entire audio output, which
+    // includes the remote participants being played here, so mixing it makes
+    // everyone hear their own voice returned through the share.
+    const capturedAudioTracks = stream.getAudioTracks();
+    if (capturedAudioTracks.length > 0 && !canMixSystemAudio(getDisplaySurface(videoTrack))) {
+      capturedAudioTracks.forEach(track => {
+        track.onended = null;
+        track.stop();
+        stream.removeTrack(track);
+      });
+      showWarning(SYSTEM_AUDIO_ECHO_WARNING);
     }
 
     screenStreamRef.current = stream;
