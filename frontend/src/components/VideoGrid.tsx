@@ -239,13 +239,29 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
         )}
       </div>
 
-      {/* Network connection strength indicators */}
-      {stats && !isMe && (
-        <div className="connection-stats-badge" title={`RTT: ${stats.rtt}ms, Paket Kaybı: ${stats.packetLoss}%`}>
-          <Activity size={12} className="stats-icon" />
-          <span>{stats.rtt}ms</span>
+      {/* Top-right stack: connection quality + mute badges.
+          These share one container so they can never overlap each other. */}
+      <div className="card-top-right-stack">
+        {stats && !isMe && (
+          <div className="connection-stats-badge" title={`RTT: ${stats.rtt}ms, Paket Kaybı: ${stats.packetLoss}%`}>
+            <Activity size={12} className="stats-icon" />
+            <span>{stats.rtt}ms</span>
+          </div>
+        )}
+
+        <div className="stream-status-indicators">
+          {p.isAudioMuted && (
+            <div className="status-badge" title="Mikrofon Kapalı">
+              <MicOff size={14} />
+            </div>
+          )}
+          {p.isVideoMuted && !isScreen && (
+            <div className="status-badge" title="Kamera Kapalı">
+              <VideoOff size={14} />
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Live telemetry for our own screen share — what viewers actually receive */}
       {isMe && isScreen && screenShareStats && (
@@ -272,20 +288,6 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
           )}
         </div>
       )}
-
-      {/* Audio/Video Mute status badges */}
-      <div className="stream-status-indicators">
-        {p.isAudioMuted && (
-          <div className="status-badge" title="Mikrofon Kapalı">
-            <MicOff size={14} />
-          </div>
-        )}
-        {p.isVideoMuted && !isScreen && (
-          <div className="status-badge" title="Kamera Kapalı">
-            <VideoOff size={14} />
-          </div>
-        )}
-      </div>
 
       {/* Media element (always mounted while a stream exists — it carries the audio)
           plus the Avatar placeholder when video is off */}

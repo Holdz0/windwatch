@@ -41,7 +41,7 @@ const Controls: React.FC<ControlsProps> = ({
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
   const qualityMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // Close the popover on an outside click
+  // Close the popover on an outside click or Escape
   useEffect(() => {
     if (!isQualityMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -49,8 +49,15 @@ const Controls: React.FC<ControlsProps> = ({
         setIsQualityMenuOpen(false);
       }
     };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsQualityMenuOpen(false);
+    };
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [isQualityMenuOpen]);
 
   const isShareBlocked = !isScreenSharing && !!screenShareBlockedBy;

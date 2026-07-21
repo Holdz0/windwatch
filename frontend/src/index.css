@@ -15,30 +15,67 @@
   
   /* pops of vibrant accent colors */
   --color-blue: #2563eb;
+  --color-blue-hover: #1d4ed8;
   --color-green: #10b981;
   --color-red: #ef4444;
+  --color-red-soft: #f87171;
   --color-yellow: #f59e0b;
-  
+  --color-yellow-soft: #fbbf24;
+  --color-violet: #7c3aed;
+  --color-cyan: #06b6d4;
+
+  /* Foreground colors for use ON a filled accent / light surface */
+  --color-on-accent: #ffffff;
+  --color-on-light: #000000;
+
+  /* Translucent accent tints — one scale, reused by every badge and state */
+  --tint-blue: rgba(37, 99, 235, 0.06);
+  --tint-blue-strong: rgba(37, 99, 235, 0.12);
+  --tint-green: rgba(16, 185, 129, 0.06);
+  --tint-red: rgba(239, 68, 68, 0.08);
+  --tint-yellow: rgba(245, 158, 11, 0.06);
+  --tint-surface: rgba(255, 255, 255, 0.03);
+  --tint-surface-hover: rgba(255, 255, 255, 0.08);
+
   --color-primary: #ffffff;
   --color-primary-hover: #f3f4f6;
   --color-primary-glow: rgba(255, 255, 255, 0.05);
-  
+
   --color-text-primary: #ffffff;
   --color-text-secondary: #a3a3a3;
   --color-text-muted: #525252;
-  
+
   --shadow-glow: 0 0 20px rgba(255, 255, 255, 0.05);
-  
+  /* Shared elevation scale for popovers, panels and modals */
+  --shadow-popover: 0 18px 45px rgba(0, 0, 0, 0.55);
+  --shadow-modal: 0 25px 50px rgba(0, 0, 0, 0.5);
+
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
-  
-  /* Snappy high-end transition curve */
-  --transition-smooth: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  /* Pill radius, previously written as a magic 20px in a dozen places */
+  --radius-pill: 999px;
+
+  /* Snappy high-end transition curve.
+     Deliberately NOT `all`: transitioning every property also animates
+     outline-width/outline-color, which delayed and mis-rendered the keyboard
+     focus ring, and needlessly animates layout properties. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-smooth:
+    color 0.4s var(--ease-out),
+    background-color 0.4s var(--ease-out),
+    background-image 0.4s var(--ease-out),
+    border-color 0.4s var(--ease-out),
+    box-shadow 0.4s var(--ease-out),
+    transform 0.4s var(--ease-out),
+    opacity 0.4s var(--ease-out),
+    filter 0.4s var(--ease-out);
 
   /* Layout Constants */
   --header-height: 72px;
   --controls-height: 88px;
+  /* Overlay inset used by every badge/control floating on a video card */
+  --card-inset: 12px;
 }
 
 * {
@@ -144,7 +181,7 @@ body {
 .blob-2 {
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, #7c3aed 0%, transparent 80%);
+  background: radial-gradient(circle, var(--color-violet) 0%, transparent 80%);
   bottom: -150px;
   right: -100px;
   animation: floatBlob 30s infinite alternate-reverse ease-in-out;
@@ -153,7 +190,7 @@ body {
 .blob-3 {
   width: 400px;
   height: 400px;
-  background: radial-gradient(circle, #06b6d4 0%, transparent 80%);
+  background: radial-gradient(circle, var(--color-cyan) 0%, transparent 80%);
   top: 40%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -195,7 +232,7 @@ body {
 }
 
 .brand-logo-icon {
-  background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+  background: linear-gradient(135deg, #2563eb 0%, var(--color-violet) 100%);
   color: #ffffff;
   padding: 12px;
   border-radius: 50%;
@@ -215,7 +252,7 @@ body {
 
 .landing-logo::after {
   content: '.';
-  color: #7c3aed;
+  color: var(--color-violet);
   font-size: 2.8rem;
 }
 
@@ -295,7 +332,7 @@ body {
 .error-alert {
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  color: var(--color-red-soft);
   padding: 12px 16px;
   border-radius: var(--radius-sm);
   font-size: 0.85rem;
@@ -648,14 +685,23 @@ body {
   transform: scale(1.1);
 }
 
-/* Top-Right indicators */
-.stream-status-indicators {
+/* Top-right overlay stack. The connection badge and the mute badges used to be
+   positioned at the same coordinates and covered each other; they now share one
+   flow container so they always sit side by side. */
+.card-top-right-stack {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: var(--card-inset);
+  right: var(--card-inset);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 15;
+  max-width: calc(100% - (var(--card-inset) * 2));
+}
+
+.stream-status-indicators {
   display: flex;
   gap: 6px;
-  z-index: 5;
 }
 
 .status-badge {
@@ -966,14 +1012,9 @@ body {
     margin-left: 6px !important;
   }
 
-  /* Chat list responsive paddings */
-  .chat-header, .chat-messages {
-    padding: 16px;
-  }
-  
-  .chat-input-form {
-    padding: 12px 16px;
-  }
+  /* NOTE: the chat panel's responsive paddings live in the consolidated
+     responsive section at the end of this file — the chat base rules are
+     declared after this block, so overrides here would never apply. */
 }
 
 .chat-header {
@@ -1120,7 +1161,7 @@ body {
 
 /* Non-fatal warning variant (rate limits, host actions etc.) */
 .toast-notification.warning {
-  border-color: #f59e0b;
+  border-color: var(--color-yellow);
   box-shadow: 0 10px 30px rgba(245, 158, 11, 0.15);
   bottom: 160px;
 }
@@ -1239,8 +1280,8 @@ body {
 }
 
 .screen-stats-badge.limited {
-  border-color: #f59e0b;
-  color: #fbbf24;
+  border-color: var(--color-yellow);
+  color: var(--color-yellow-soft);
 }
 
 .screen-stats-warning {
@@ -1327,16 +1368,8 @@ body {
   box-shadow: 0 0 0 2px var(--color-blue);
 }
 
-/* Picture-in-Picture & Pin Button Styles */
-.card-top-left-actions {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  display: flex;
-  gap: 6px;
-  z-index: 15;
-}
-
+/* Picture-in-Picture & Pin Button Styles
+   (.card-top-left-actions itself is declared once, near the card overlays above) */
 .card-top-left-actions button {
   width: 28px;
   height: 28px;
@@ -1364,22 +1397,19 @@ body {
   border-color: var(--color-blue);
 }
 
-/* Connection Stats Badge */
+/* Connection Stats Badge (laid out inside .card-top-right-stack) */
 .connection-stats-badge {
-  position: absolute;
-  top: 12px;
-  right: 12px;
   display: flex;
   align-items: center;
   gap: 4px;
   background: rgba(10, 10, 10, 0.6);
   border: 1px solid var(--border-glass);
   padding: 4px 8px;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   font-size: 0.7rem;
   color: var(--color-text-secondary);
   backdrop-filter: blur(10px);
-  z-index: 15;
+  white-space: nowrap;
 }
 
 .stats-icon {
@@ -1500,6 +1530,9 @@ body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: var(--transition-smooth);
+  /* .btn-secondary carries a 14px top margin for stacked forms; side-by-side
+     here it pushed the "Geri Dön" button out of alignment with "Giriş Yap". */
+  margin-top: 0;
 }
 
 .password-prompt-buttons .btn-secondary {
@@ -1519,7 +1552,7 @@ body {
 }
 
 .password-prompt-buttons .btn-primary:hover {
-  background: #1d4ed8;
+  background: var(--color-blue-hover);
 }
 
 /* Header lock badging & actions */
@@ -1614,9 +1647,13 @@ body {
   width: 100%;
 }
 
+/* The file card is its own surface sitting directly in the bubble — it is NOT
+   inside the white .chat-bubble-content, so the dark-on-dark text overrides that
+   used to live here rendered black text on a near-black card (invisible).
+   Own files are distinguished by a lighter surface instead. */
 .chat-bubble.self .chat-file-card {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 .file-info-header {
@@ -1630,9 +1667,6 @@ body {
   flex-shrink: 0;
 }
 
-.chat-bubble.self .file-icon {
-  color: #000000;
-}
 
 .file-meta {
   display: flex;
@@ -1649,18 +1683,12 @@ body {
   white-space: nowrap;
 }
 
-.chat-bubble.self .file-name {
-  color: #000000;
-}
 
 .file-size {
   font-size: 0.7rem;
   color: var(--color-text-secondary);
 }
 
-.chat-bubble.self .file-size {
-  color: rgba(0, 0, 0, 0.6);
-}
 
 .file-card-action {
   width: 100%;
@@ -1685,7 +1713,7 @@ body {
 }
 
 .btn-file-download:hover {
-  background: #1d4ed8;
+  background: var(--color-blue-hover);
 }
 
 .btn-file-download.downloading {
@@ -1701,9 +1729,6 @@ body {
   align-items: center;
 }
 
-.chat-bubble.self .file-status-sent {
-  color: rgba(0, 0, 0, 0.65);
-}
 
 @keyframes fadeIn {
   from { opacity: 0; }
@@ -1769,5 +1794,229 @@ body {
     box-shadow: none !important;
     transform: none !important;
     animation: none !important;
+  }
+}
+
+
+/* ==========================================================================
+   Interaction states, accessibility and responsive corrections.
+   This section is intentionally last so its overrides always win the cascade —
+   several mobile rules further up were previously declared before the base
+   rules they targeted and therefore never applied.
+   ========================================================================== */
+
+/* --- Keyboard focus ------------------------------------------------------ */
+/* Every interactive surface previously fell back to the browser default ring,
+   which is invisible against this dark theme. */
+:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+.btn-primary:focus-visible,
+.chat-send-btn:focus-visible {
+  /* The white fill needs a ring that reads against it */
+  outline-color: var(--color-text-primary);
+  outline-offset: 3px;
+}
+
+.form-input:focus-visible,
+.chat-input:focus-visible {
+  outline: none; /* these already show a border + glow treatment */
+}
+
+/* --- Disabled states ----------------------------------------------------- */
+.ctrl-btn:disabled,
+.ctrl-btn.is-disabled,
+.btn:disabled,
+.btn-file-download:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Hover affordances must not fire on something that cannot be clicked */
+.ctrl-btn:disabled:hover,
+.ctrl-btn.is-disabled:hover,
+.btn:disabled:hover,
+.btn-file-download:disabled:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-file-download:disabled:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* --- Toast stack --------------------------------------------------------- */
+/* Toasts used to be two independently positioned elements at hardcoded offsets
+   (110px / 160px), which left a floating gap when only one was visible. */
+.toast-stack {
+  position: fixed;
+  bottom: calc(var(--controls-height) + 24px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 10px;
+  z-index: 100;
+  pointer-events: none;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+}
+
+.toast-notification {
+  position: static;
+  transform: none;
+  opacity: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--color-green);
+  color: var(--color-text-primary);
+  padding: 14px 28px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(16, 185, 129, 0.15);
+  animation: toastIn 0.35s var(--ease-out) both;
+}
+
+.toast-notification.warning {
+  border-color: var(--color-yellow);
+  box-shadow: 0 10px 30px rgba(245, 158, 11, 0.15);
+  bottom: auto;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* --- Popover sizing ------------------------------------------------------ */
+/* On short viewports the quality menu is taller than the space above the
+   control bar; let it scroll instead of clipping off-screen. */
+.quality-menu {
+  max-height: calc(100vh - var(--controls-height) - 48px);
+  max-height: calc(100dvh - var(--controls-height) - 48px);
+  overflow-y: auto;
+}
+
+/* --- Thumbnail strip cards ----------------------------------------------- */
+/* Thumbnails are 144x81; the full overlay set (volume slider, moderator bar,
+   telemetry) is wider than the card itself and collided with the name tag. */
+.thumbnails-strip-container .volume-control,
+.thumbnails-strip-container .moderator-card-controls,
+.thumbnails-strip-container .screen-stats-badge,
+.thumbnails-strip-container .connection-stats-badge {
+  display: none;
+}
+
+.thumbnails-strip-container .card-top-left-actions {
+  top: 6px;
+  left: 6px;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.thumbnails-strip-container .video-card:hover .card-top-left-actions {
+  opacity: 1;
+}
+
+.thumbnails-strip-container .card-top-left-actions button {
+  width: 22px;
+  height: 22px;
+}
+
+.thumbnails-strip-container .card-top-left-actions button svg {
+  width: 11px;
+  height: 11px;
+}
+
+.thumbnails-strip-container .card-top-right-stack {
+  top: 6px;
+  right: 6px;
+  gap: 4px;
+}
+
+.thumbnails-strip-container .status-badge {
+  padding: 3px;
+}
+
+.thumbnails-strip-container .status-badge svg {
+  width: 10px;
+  height: 10px;
+}
+
+.thumbnails-strip-container .user-tag {
+  bottom: 6px;
+  left: 6px;
+  padding: 3px 8px;
+  font-size: 0.62rem;
+  gap: 4px;
+  max-width: calc(100% - 12px);
+}
+
+/* --- Responsive corrections ---------------------------------------------- */
+@media (max-width: 640px) {
+  /* Touch devices have no hover, so card overlays must be reachable */
+  .moderator-card-controls {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  .card-top-left-actions {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 480px) {
+  /* These belong here rather than in the earlier 480px block: the chat panel's
+     base rules are declared after it, so they used to win the cascade. */
+  .chat-header,
+  .chat-messages {
+    padding: 16px;
+  }
+
+  .chat-input-form {
+    padding: 12px 16px;
+  }
+
+  .chat-messages {
+    gap: 14px;
+  }
+
+  .toast-stack {
+    bottom: calc(var(--controls-height) + 16px);
+  }
+
+  .toast-notification {
+    padding: 11px 18px;
+    font-size: 0.8rem;
+  }
+}
+
+/* --- Motion preferences --------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Purely decorative motion is removed outright */
+  .bg-glow {
+    animation: none !important;
+  }
+
+  .ctrl-btn:hover,
+  .video-card.speaking-active,
+  .btn-primary:hover,
+  .room-id-tag:hover {
+    transform: none !important;
   }
 }

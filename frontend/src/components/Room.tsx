@@ -1353,12 +1353,14 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
   return (
     <div className="room-container">
-      {/* Toast Notifications */}
-      <div className={`toast-notification ${showCopiedToast ? 'show' : ''}`}>
-        Davet linki panoya kopyalandı!
-      </div>
-      <div className={`toast-notification warning ${warningToast ? 'show' : ''}`}>
-        {warningToast}
+      {/* Toast notifications — stacked so they never overlap or leave a gap */}
+      <div className="toast-stack" aria-live="polite">
+        {showCopiedToast && (
+          <div className="toast-notification">Davet linki panoya kopyalandı!</div>
+        )}
+        {warningToast && (
+          <div className="toast-notification warning">{warningToast}</div>
+        )}
       </div>
 
       {/* Password Prompt Overlay */}
