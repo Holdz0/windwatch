@@ -22,7 +22,8 @@ import {
   screenEncodingFor,
   getDisplaySurface,
   canMixSystemAudio,
-  SYSTEM_AUDIO_ECHO_WARNING
+  SYSTEM_AUDIO_BLOCKED_HINT,
+  DESKTOP_AUDIO_ECHO_HINT
 } from '../utils/screenShare';
 import type { ScreenShareQuality, ScreenShareStats } from '../utils/screenShare';
 
@@ -148,6 +149,27 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // and the live stats let the sharer see what viewers are actually receiving.
   const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
   const [screenShareStats, setScreenShareStats] = useState<ScreenShareStats | null>(null);
+
+  // Opt-in for sharing desktop application audio (Steam/Discord/game sound).
+  // It is the only way to capture a native app's sound, but it also captures the
+  // call itself, so it stays off until the user asks for it. Remembered across
+  // sessions because it is a deliberate, recurring preference.
+  const [allowDesktopAudio, setAllowDesktopAudio] = useState(() => {
+    try {
+      return localStorage.getItem('windwatch:desktopAudio') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const allowDesktopAudioRef = useRef(allowDesktopAudio);
+  useEffect(() => {
+    allowDesktopAudioRef.current = allowDesktopAudio;
+    try {
+      localStorage.setItem('windwatch:desktopAudio', allowDesktopAudio ? '1' : '0');
+    } catch {
+      // storage unavailable (private mode) — the preference just won't persist
+    }
+  }, [allowDesktopAudio]);
 
   // Immersive landscape stage.
   // Turning a phone sideways during a screen share used to keep the 64px header and
@@ -1098,18 +1120,22 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       return;
     }
 
-    // Drop system audio that would feed the call back to the people in it.
-    // Capturing a whole screen takes the machine's entire audio output, which
-    // includes the remote participants being played here, so mixing it makes
-    // everyone hear their own voice returned through the share.
+    // Desktop audio carries the call itself back to the room (see canMixSystemAudio),
+    // so it is only mixed when the user has opted into that trade-off.
+    const surface = getDisplaySurface(videoTrack);
     const capturedAudioTracks = stream.getAudioTracks();
-    if (capturedAudioTracks.length > 0 && !canMixSystemAudio(getDisplaySurface(videoTrack))) {
-      capturedAudioTracks.forEach(track => {
-        track.onended = null;
-        track.stop();
-        stream.removeTrack(track);
-      });
-      showWarning(SYSTEM_AUDIO_ECHO_WARNING);
+    if (capturedAudioTracks.length > 0) {
+      if (!canMixSystemAudio(surface, allowDesktopAudioRef.current)) {
+        capturedAudioTracks.forEach(track => {
+          track.onended = null;
+          track.stop();
+          stream.removeTrack(track);
+        });
+        showWarning(SYSTEM_AUDIO_BLOCKED_HINT);
+      } else if (surface !== 'browser') {
+        // Sharing it deliberately — make the echo risk explicit rather than a surprise
+        showWarning(DESKTOP_AUDIO_ECHO_HINT);
+      }
     }
 
     screenStreamRef.current = stream;
@@ -1552,6 +1578,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           screenQuality={screenQuality}
           onChangeScreenQuality={changeScreenQuality}
           screenShareBlockedBy={remoteSharer?.username}
+          allowDesktopAudio={allowDesktopAudio}
+          onToggleDesktopAudio={setAllowDesktopAudio}
         />
       </div>
 

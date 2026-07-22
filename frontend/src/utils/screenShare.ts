@@ -108,25 +108,31 @@ export function getDisplaySurface(track: MediaStreamTrack): DisplaySurface {
 }
 
 /**
- * Whether the audio captured alongside this surface is safe to mix into our
+ * Whether the audio captured alongside this surface may be mixed into our
  * outgoing stream.
  *
- * Screen ("monitor") and window captures take the machine's entire audio output,
- * which includes the other participants' voices being played on this machine.
- * Mixing that sends everyone their own voice back — a feedback loop the remote
- * side hears as an echo of themselves.
+ * Tab ("browser") audio is scoped to the captured tab, and the picker excludes
+ * our own tab via selfBrowserSurface, so it cannot contain the call — always safe.
  *
- * Tab ("browser") audio is scoped to the captured tab, and the picker already
- * excludes our own tab via selfBrowserSurface, so it cannot contain the call.
- * An undetermined surface is treated as unsafe: a silent share is a far smaller
- * problem than an echo that makes the room unusable for everyone.
+ * Screen and window captures take the machine's entire audio output. That is the
+ * only way to share a desktop application's sound (a game, Steam or Discord voice
+ * chat), but it also picks up the other participants being played on this machine
+ * and sends them their own voice back as an echo. There is no way to capture one
+ * without the other, so this is the caller's decision: `allowDesktopAudio` opts
+ * into that trade-off, and it defaults to off.
  */
-export function canMixSystemAudio(surface: DisplaySurface): boolean {
-  return surface === 'browser';
+export function canMixSystemAudio(surface: DisplaySurface, allowDesktopAudio: boolean): boolean {
+  if (surface === 'browser') return true;
+  return allowDesktopAudio;
 }
 
-export const SYSTEM_AUDIO_ECHO_WARNING =
-  'Sistem sesi paylaşılmadı: tüm ekran paylaşımında diğer katılımcılar kendi seslerini yankı olarak duyar. Ses de paylaşmak için tek bir sekme paylaşın.';
+/** Shown when desktop audio was captured but the user has not opted in. */
+export const SYSTEM_AUDIO_BLOCKED_HINT =
+  'Sistem sesi paylaşılmadı. Steam, Discord veya oyun sesini paylaşmak için ayarlar menüsünden "Masaüstü sesini paylaş" seçeneğini açın.';
+
+/** Shown when desktop audio is being shared, so the echo risk is not a surprise. */
+export const DESKTOP_AUDIO_ECHO_HINT =
+  'Masaüstü sesi paylaşılıyor. Konuşan katılımcılar kendi seslerini yankı olarak duyabilir — konuşmayanların mikrofonu kapalı tutması önerilir.';
 
 export interface VideoEncodingOptions {
   maxBitrate: number;

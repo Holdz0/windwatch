@@ -20,6 +20,8 @@ interface ControlsProps {
   onChangeScreenQuality: (quality: ScreenShareQuality) => void;
   /** Username of another member currently sharing, if any */
   screenShareBlockedBy?: string;
+  allowDesktopAudio: boolean;
+  onToggleDesktopAudio: (enabled: boolean) => void;
 }
 
 const QUALITY_ORDER: ScreenShareQuality[] = ['detail', 'balanced', 'motion'];
@@ -36,7 +38,9 @@ const Controls: React.FC<ControlsProps> = ({
   onLeave,
   screenQuality,
   onChangeScreenQuality,
-  screenShareBlockedBy
+  screenShareBlockedBy,
+  allowDesktopAudio,
+  onToggleDesktopAudio
 }) => {
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
   const qualityMenuRef = useRef<HTMLDivElement | null>(null);
@@ -132,8 +136,26 @@ const Controls: React.FC<ControlsProps> = ({
                 </button>
               );
             })}
+            <div className="quality-menu-section">
+              <label className="quality-toggle">
+                <input
+                  type="checkbox"
+                  checked={allowDesktopAudio}
+                  onChange={(e) => onToggleDesktopAudio(e.target.checked)}
+                />
+                <span className="quality-toggle-text">
+                  <span className="quality-option-label">Masaüstü sesini paylaş</span>
+                  <span className="quality-option-hint">
+                    Steam, Discord ve oyun sesleri de paylaşılır. Tüm ekran paylaşımında
+                    konuşan katılımcılar kendi seslerini yankı olarak duyabilir.
+                  </span>
+                </span>
+              </label>
+            </div>
+
             <div className="quality-menu-footer">
-              Paylaşım sürerken de değiştirilebilir.
+              Paylaşım sürerken de değiştirilebilir. Sekme paylaşımında o sekmenin sesi
+              her zaman gönderilir.
             </div>
           </div>
         )}

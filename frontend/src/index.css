@@ -2177,3 +2177,39 @@ body {
 .room-container.immersive-stage .toast-stack {
   bottom: 72px;
 }
+
+/* Desktop-audio opt-in inside the screen share settings popover */
+.quality-menu-section {
+  border-top: 1px solid var(--border-glass);
+  margin-top: 4px;
+  padding-top: 6px;
+}
+
+.quality-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.quality-toggle:hover {
+  background: var(--tint-surface);
+}
+
+.quality-toggle input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--color-blue);
+  cursor: pointer;
+}
+
+.quality-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
