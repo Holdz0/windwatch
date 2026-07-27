@@ -118,9 +118,14 @@ export function registerRemoteMediaElement(el: HTMLMediaElement): () => void {
 // Attempts to play one remote element immediately. Often succeeds (the browser
 // may still honour the join gesture, or audio is already unlocked); if it is
 // blocked, the armed gesture listeners will replay it on the next interaction.
+// The rejection reason is logged so real-world failures are diagnosable.
 export function playRemoteMediaElement(el: HTMLMediaElement): void {
   const attempt = el.play();
-  if (attempt && typeof attempt.catch === 'function') attempt.catch(() => {});
+  if (attempt && typeof attempt.catch === 'function') {
+    attempt.catch((err: any) => {
+      console.warn('[windwatch-audio] play() rejected:', err?.name || err);
+    });
+  }
 }
 
 // Clears all unlock state and listeners. Called when leaving a room so nothing

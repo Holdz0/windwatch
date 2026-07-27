@@ -344,10 +344,13 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       if (camVideoTrack) tracks.push(camVideoTrack);
     }
 
-    // Audio Track: Use mixed audio (mic + system) if screen sharing, otherwise microphone
+    // Audio: mixed (mic + system) when the mixer is active; otherwise the raw
+    // screen audio during a share; otherwise the microphone / silent track
     if (audioDestinationRef.current) {
       const mixedAudioTrack = audioDestinationRef.current.stream.getAudioTracks()[0];
       if (mixedAudioTrack) tracks.push(mixedAudioTrack);
+    } else if (screenStreamRef.current && screenStreamRef.current.getAudioTracks().length > 0) {
+      tracks.push(screenStreamRef.current.getAudioTracks()[0]);
     } else if (localStreamRef.current) {
       const micAudioTrack = localStreamRef.current.getAudioTracks()[0];
       if (micAudioTrack) tracks.push(micAudioTrack);
@@ -447,9 +450,57 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       audioDestinationRef.current = dest;
       return dest.stream.getAudioTracks()[0] || null;
     } catch (err) {
-      console.warn('Could not mix audio streams, falling back to mic audio only:', err);
+      console.warn('Could not mix audio streams, falling back to raw share audio:', err);
       return null;
     }
+  };
+
+  // A mixer built on a still-suspended AudioContext outputs pure silence. In
+  // practice the click that started the share resumes the context, but if it
+  // has not come up shortly after, drop the mix and send the raw share audio —
+  // total silence for every viewer is the one unacceptable outcome.
+  const verifyMixerAlive = () => {
+    window.setTimeout(() => {
+      if (!mixerRef.current || !screenStreamRef.current) return;
+      const ctx = getSharedAudioContext();
+      if (ctx.state === 'running') return;
+      console.warn('[windwatch-audio] AudioContext still suspended; switching to raw share audio.');
+      teardownMixer();
+      const raw = screenStreamRef.current.getAudioTracks()[0];
+      if (raw) replaceAudioSenders(raw);
+    }, 700);
+  };
+
+  // Picks (and wires up) the correct outgoing audio for the current state.
+  //
+  //   sharing + screen audio + mic LIVE   -> mixer(mic + share)
+  //   sharing + screen audio + mic muted  -> RAW share audio track (no Web Audio
+  //                                          in the path at all — this is the
+  //                                          movie-night case and must be bulletproof)
+  //   otherwise                           -> microphone / silent placeholder
+  //
+  // Returns the track every peer's audio sender should carry.
+  const rebuildOutgoingAudio = (): MediaStreamTrack | null => {
+    const screenAudio = screenStreamRef.current?.getAudioTracks()[0] ?? null;
+    const micTrack = localStreamRef.current?.getAudioTracks()[0] ?? null;
+
+    if (screenAudio) {
+      if (!isAudioMutedRef.current && micTrack) {
+        const mixed = buildMixer();
+        if (mixed) {
+          verifyMixerAlive();
+          return mixed;
+        }
+        // Mixing unavailable: favour the share audio over the mic
+        teardownMixer();
+        return screenAudio;
+      }
+      teardownMixer();
+      return screenAudio;
+    }
+
+    teardownMixer();
+    return micTrack;
   };
 
   // Replaces the current mic track with a synthetic silent one and syncs peers.
@@ -464,12 +515,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     const silentAudioTrack = createSilentAudioTrack();
     localStreamRef.current.addTrack(silentAudioTrack);
 
-    if (screenStreamRef.current) {
-      const mixed = buildMixer();
-      replaceAudioSenders(mixed ?? silentAudioTrack);
-    } else {
-      replaceAudioSenders(silentAudioTrack);
-    }
+    // Muting must be reflected in the ref BEFORE choosing the outgoing audio,
+    // so a running share keeps sending its raw audio instead of a mic mix
+    isAudioMutedRef.current = true;
+    replaceAudioSenders(rebuildOutgoingAudio() ?? silentAudioTrack);
 
     setIsAudioMuted(true);
     updateLocalParticipant({ isAudioMuted: true });
@@ -1022,13 +1071,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         if (oldAudioTrack) localStreamRef.current.removeTrack(oldAudioTrack);
         localStreamRef.current.addTrack(realAudioTrack);
 
-        if (screenStreamRef.current) {
-          // Re-mix system audio with the new hardware mic track
-          const mixed = buildMixer();
-          replaceAudioSenders(mixed ?? realAudioTrack);
-        } else {
-          replaceAudioSenders(realAudioTrack);
-        }
+        // Unmuting must be reflected in the ref BEFORE choosing the outgoing
+        // audio, so an active share switches from raw share audio to the mix
+        isAudioMutedRef.current = false;
+        replaceAudioSenders(rebuildOutgoingAudio() ?? realAudioTrack);
 
         setIsAudioMuted(false);
         updateLocalParticipant({ isAudioMuted: false });
@@ -1159,10 +1205,15 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       videoTrack.contentHint = preset.contentHint;
     }
 
-    // Mix system audio with microphone if the screen stream has audio
-    const mixedAudioTrack = buildMixer();
-    if (mixedAudioTrack) {
-      console.log('System audio mixed successfully with microphone.');
+    // Choose the outgoing audio for the share: raw share audio while the mic is
+    // muted (no Web Audio in the path), the mic+share mix while it is live
+    const outgoingAudio = rebuildOutgoingAudio();
+    if (outgoingAudio) {
+      console.log(
+        audioDestinationRef.current
+          ? '[windwatch-audio] Sending mic + share audio mix.'
+          : '[windwatch-audio] Sending raw share/mic audio track.'
+      );
     }
 
     // Swap tracks + encoder profile on every active call
@@ -1176,9 +1227,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           await applyVideoEncoding(videoSender, screenEncodingFor(preset, preset.maxBitrate));
         }
 
-        if (mixedAudioTrack) {
+        if (outgoingAudio) {
           const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-          if (audioSender) await audioSender.replaceTrack(mixedAudioTrack);
+          if (audioSender) await audioSender.replaceTrack(outgoingAudio);
         }
       })
     );
@@ -1192,15 +1243,13 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     };
 
     // Losing just the system-audio track (e.g. switching surfaces) must not kill
-    // the share — rebuild the mixer so the microphone keeps flowing.
+    // the share — re-pick the outgoing audio so the microphone keeps flowing.
     const screenAudioTrack = stream.getAudioTracks()[0];
     if (screenAudioTrack) {
       screenAudioTrack.onended = () => {
         if (!screenStreamRef.current) return;
-        buildMixer();
-        const fallback =
-          audioDestinationRef.current?.stream.getAudioTracks()[0] ||
-          localStreamRef.current?.getAudioTracks()[0];
+        screenStreamRef.current.removeTrack(screenAudioTrack);
+        const fallback = rebuildOutgoingAudio() ?? localStreamRef.current?.getAudioTracks()[0];
         if (fallback) replaceAudioSenders(fallback);
       };
     }

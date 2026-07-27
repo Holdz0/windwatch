@@ -61,8 +61,32 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
   screenShareStats
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Dedicated, always-hidden audio element. Remote audio is played ONLY through
+  // this element — never through the video element, whose lifecycle is tangled
+  // with display logic (avatar mode, PiP, fullscreen). This mirrors what major
+  // conferencing apps do and removes a whole class of "video visible but silent"
+  // failure modes.
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [pipSupported, setPipSupported] = useState(false);
+
+  // WebRTC mutates the remote MediaStream object in place as tracks arrive or
+  // vanish; React cannot see that. This revision counter bumps on addtrack /
+  // removetrack so the binding effects re-run with the current track set —
+  // Chromium does not reliably render tracks added to an element that is
+  // already playing (long-standing bug), so re-binding is required.
+  const [streamRevision, setStreamRevision] = useState(0);
+  useEffect(() => {
+    const stream = p.stream;
+    if (!stream) return;
+    const bump = () => setStreamRevision(v => v + 1);
+    stream.addEventListener('addtrack', bump);
+    stream.addEventListener('removetrack', bump);
+    return () => {
+      stream.removeEventListener('addtrack', bump);
+      stream.removeEventListener('removetrack', bump);
+    };
+  }, [p.stream]);
 
   // Playback volume for this participant's stream (0..1), adjustable by the viewer.
   // The last non-zero value is kept so the speaker toggle can restore it.
@@ -89,36 +113,69 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       .slice(0, 2);
   };
 
-  // Bind the WebRTC stream to the media element and make sure playback starts.
-  // Our own element is muted and always autoplays; a remote element is unmuted,
-  // so the browser can reject its autoplay. Remote elements are registered with
-  // the audio-unlock helper, which retries play() on the next user gesture and
-  // surfaces a "tap for sound" prompt — otherwise the participant stays silent
-  // even though their audio is arriving (see utils/audio.ts).
+  // Bind the stream to the VIDEO element. The video element is permanently
+  // muted — audio never depends on it — so its autoplay is always allowed.
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl || !p.stream) return;
 
     if (videoEl.srcObject !== p.stream) {
       videoEl.srcObject = p.stream;
+    } else if (streamRevision > 0) {
+      // Same stream object but its track set changed: force a re-bind so
+      // Chromium actually renders the newly added track.
+      videoEl.srcObject = null;
+      videoEl.srcObject = p.stream;
     }
+    videoEl.play().catch(() => {});
+  }, [p.stream, streamRevision, showVideo]);
 
-    if (isMe) {
-      videoEl.play().catch(() => {});
+  // Bind remote audio to the dedicated AUDIO element, with every recovery path:
+  //  - rebuilt whenever the stream's track set changes (late-arriving tracks)
+  //  - play() retried on track 'unmute' (fires when the first RTP data arrives)
+  //  - play() retried if the element pauses for any external reason
+  //  - registered with the gesture unlock (autoplay policy)
+  //  - a watchdog nudges play() while a live track sits on a paused element
+  useEffect(() => {
+    const audioEl = audioRef.current;
+    if (isMe || !audioEl || !p.stream) return;
+
+    const audioTracks = p.stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      audioEl.srcObject = null;
       return;
     }
 
-    const unregister = registerRemoteMediaElement(videoEl);
-    playRemoteMediaElement(videoEl);
-    return unregister;
-  }, [p.stream, showVideo, isMe]);
+    audioEl.srcObject = new MediaStream(audioTracks);
 
-  // Apply the viewer-selected volume to the media element
+    const unregister = registerRemoteMediaElement(audioEl);
+    playRemoteMediaElement(audioEl);
+
+    const retry = () => playRemoteMediaElement(audioEl);
+    audioTracks.forEach(t => t.addEventListener('unmute', retry));
+    audioEl.addEventListener('pause', retry);
+
+    const watchdog = window.setInterval(() => {
+      if (audioEl.paused && audioTracks.some(t => t.readyState === 'live')) {
+        playRemoteMediaElement(audioEl);
+      }
+    }, 2000);
+
+    return () => {
+      window.clearInterval(watchdog);
+      audioEl.removeEventListener('pause', retry);
+      audioTracks.forEach(t => t.removeEventListener('unmute', retry));
+      unregister();
+      audioEl.srcObject = null;
+    };
+  }, [p.stream, streamRevision, isMe]);
+
+  // Apply the viewer-selected volume to the audio element
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = volume;
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
     }
-  }, [volume, p.stream]);
+  }, [volume, p.stream, streamRevision]);
 
   // Check for picture-in-picture API support
   useEffect(() => {
@@ -143,6 +200,7 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
 
     let analyser: AnalyserNode | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
+    let analyserTrack: MediaStreamTrack | null = null;
     let animFrameId: number;
 
     try {
@@ -152,8 +210,10 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
 
-      // Extract only the audio track from the media stream to analyze
-      source = audioCtx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
+      // Analyse a CLONE of the track: the audio element is the only consumer of
+      // the live track, so metering can never interfere with audible playback.
+      analyserTrack = audioTracks[0].clone();
+      source = audioCtx.createMediaStreamSource(new MediaStream([analyserTrack]));
       source.connect(analyser);
 
       const bufferLength = analyser.frequencyBinCount;
@@ -191,9 +251,10 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       if (animFrameId) cancelAnimationFrame(animFrameId);
       if (source) source.disconnect();
       if (analyser) analyser.disconnect();
+      if (analyserTrack) analyserTrack.stop(); // stops the clone, not the live track
       // The shared AudioContext is intentionally left open for other consumers
     };
-  }, [p.stream, p.isAudioMuted]);
+  }, [p.stream, p.isAudioMuted, streamRevision]);
 
   // Picture-in-picture triggers
   const handleTogglePiP = async (e: React.MouseEvent) => {
@@ -293,16 +354,19 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
         </div>
       )}
 
-      {/* Media element (always mounted while a stream exists — it carries the audio)
-          plus the Avatar placeholder when video is off */}
+      {/* Video element (permanently muted — remote audio plays through the
+          dedicated audio element below) plus the Avatar placeholder */}
       {p.stream && (
         <video
           ref={videoRef}
           autoPlay
           playsInline
-          muted={isMe} // Mute self to prevent hearing echo
+          muted
           style={showVideo ? undefined : { display: 'none' }}
         />
+      )}
+      {!isMe && (
+        <audio ref={audioRef} autoPlay style={{ display: 'none' }} />
       )}
       {(!p.stream || !showVideo) && (
         <div className="avatar-placeholder">
