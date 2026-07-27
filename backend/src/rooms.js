@@ -8,6 +8,9 @@ const rooms = new Map();
  * Creates a new room in memory with a unique UUID.
  * @returns {string} The generated roomId.
  */
+// A room created but never joined is kept this long before the sweeper reclaims it
+const UNJOINED_GRACE_MS = 120000;
+
 function createRoom(password = null) {
   const roomId = uuidv4();
   rooms.set(roomId, {
@@ -16,19 +19,52 @@ function createRoom(password = null) {
     hostSocketId: null,
     password: password || null,
     isLocked: false,
-    messages: []
+    messages: [],
+    createdAt: Date.now(),
+    everJoined: false
   });
-
-  // Security cleanup: If no users join the room within 2 minutes, delete it to prevent RAM leak
-  setTimeout(() => {
-    const room = rooms.get(roomId);
-    if (room && room.users.size === 0) {
-      rooms.delete(roomId);
-      console.log(`Garbage Collector: Room ${roomId} was created but never joined. Deleted from memory.`);
-    }
-  }, 120000);
-
+  // Empty-room cleanup is handled centrally by sweepRooms (see socketHandler).
   return roomId;
+}
+
+/**
+ * Reclaims rooms that no longer have anyone in them. Called periodically and
+ * given the set of currently-connected socket ids so it can also drop "phantom"
+ * members — entries whose socket has gone away without a clean disconnect, which
+ * would otherwise keep an abandoned room alive forever.
+ * @param {Set<string>} [connectedSocketIds] Live socket ids; omit to skip phantom pruning.
+ * @returns {number} How many rooms were deleted.
+ */
+function sweepRooms(connectedSocketIds) {
+  let deleted = 0;
+  for (const [roomId, room] of rooms.entries()) {
+    // Drop members whose socket is no longer connected
+    if (connectedSocketIds) {
+      for (const sid of [...room.users.keys()]) {
+        if (!connectedSocketIds.has(sid)) {
+          room.users.delete(sid);
+          if (room.hostSocketId === sid) room.hostSocketId = null;
+        }
+      }
+      // If the host went away but others remain, promote someone
+      if (room.hostSocketId === null && room.users.size > 0) {
+        const [nextId, nextUser] = room.users.entries().next().value;
+        nextUser.isHost = true;
+        room.hostSocketId = nextId;
+      }
+    }
+
+    const isEmpty = room.users.size === 0;
+    const unjoinedExpired = !room.everJoined && (Date.now() - room.createdAt > UNJOINED_GRACE_MS);
+
+    // Delete once empty if it was ever used, or if it was created but never joined
+    // within the grace period. A freshly created, not-yet-joined room is kept.
+    if (isEmpty && (room.everJoined || unjoinedExpired)) {
+      rooms.delete(roomId);
+      deleted++;
+    }
+  }
+  return deleted;
 }
 
 /**
@@ -69,6 +105,8 @@ function addUserToRoom(roomId, socketId, peerId, username) {
       }
     }
   }
+
+  room.everJoined = true;
 
   const isFirstUser = room.users.size === 0;
   const isHost = isFirstUser || wasHostBefore;
@@ -261,5 +299,6 @@ module.exports = {
   setUserMediaState,
   pushRoomMessage,
   toggleRoomLock,
-  getRoomRaw
+  getRoomRaw,
+  sweepRooms
 };

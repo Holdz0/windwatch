@@ -4,7 +4,11 @@ import {
   Pin, Trash2, VolumeX, Volume1, Volume2, Tv, Activity
 } from 'lucide-react';
 import type { Participant } from './Room';
-import { getSharedAudioContext } from '../utils/audio';
+import {
+  getSharedAudioContext,
+  registerRemoteMediaElement,
+  playRemoteMediaElement
+} from '../utils/audio';
 import { formatBitrate } from '../utils/screenShare';
 import type { ScreenShareStats } from '../utils/screenShare';
 
@@ -85,9 +89,12 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       .slice(0, 2);
   };
 
-  // Bind WebRTC stream to video element and make sure playback actually starts.
-  // Browsers can reject unmuted autoplay; when that happens the element stays
-  // paused and the participant is silent — retry on the next user gesture.
+  // Bind the WebRTC stream to the media element and make sure playback starts.
+  // Our own element is muted and always autoplays; a remote element is unmuted,
+  // so the browser can reject its autoplay. Remote elements are registered with
+  // the audio-unlock helper, which retries play() on the next user gesture and
+  // surfaces a "tap for sound" prompt — otherwise the participant stays silent
+  // even though their audio is arriving (see utils/audio.ts).
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl || !p.stream) return;
@@ -96,18 +103,15 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
       videoEl.srcObject = p.stream;
     }
 
-    let retryListener: (() => void) | null = null;
-    videoEl.play().catch(() => {
-      retryListener = () => {
-        videoEl.play().catch(() => {});
-      };
-      document.addEventListener('click', retryListener, { once: true });
-    });
+    if (isMe) {
+      videoEl.play().catch(() => {});
+      return;
+    }
 
-    return () => {
-      if (retryListener) document.removeEventListener('click', retryListener);
-    };
-  }, [p.stream, showVideo]);
+    const unregister = registerRemoteMediaElement(videoEl);
+    playRemoteMediaElement(videoEl);
+    return unregister;
+  }, [p.stream, showVideo, isMe]);
 
   // Apply the viewer-selected volume to the media element
   useEffect(() => {

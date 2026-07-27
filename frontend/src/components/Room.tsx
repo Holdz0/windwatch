@@ -10,7 +10,9 @@ import {
   createSilentAudioTrack,
   createBlackVideoTrack,
   stopMediaTrack,
-  getSharedAudioContext
+  getSharedAudioContext,
+  primeAudioUnlock,
+  resetAudioUnlock
 } from '../utils/audio';
 import {
   SCREEN_SHARE_PRESETS,
@@ -230,6 +232,14 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [isRoomLocked, setIsRoomLocked] = useState(false);
+
+  // Arm the automatic audio-playback unlock for this room session: the first
+  // user gesture of any kind silently starts remote audio that the browser
+  // blocked from autoplaying. No prompt or button — see utils/audio.ts.
+  useEffect(() => {
+    primeAudioUnlock();
+    return resetAudioUnlock;
+  }, []);
 
   // Network stats state
   const [connectionStats, setConnectionStats] = useState<Record<string, { rtt: number; packetLoss: number }>>({});
@@ -957,6 +967,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
       // Tear down the audio mixer nodes
       teardownMixer();
+
+      // Clear playback-unlock state so it doesn't leak into the next room
+      resetAudioUnlock();
 
       // Close all PeerJS calls
       Object.values(activeCalls.current).forEach((call: any) => call.close());

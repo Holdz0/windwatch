@@ -6,7 +6,8 @@ const {
   setUserScreenShare,
   setUserMediaState,
   pushRoomMessage,
-  toggleRoomLock
+  toggleRoomLock,
+  sweepRooms
 } = require('./rooms');
 
 // Helper to cap text lengths (HTML escaping is handled safely on the frontend by React)
@@ -60,6 +61,17 @@ function makeSystemMessage(text) {
 }
 
 module.exports = (io) => {
+  // Periodically reclaim empty and abandoned rooms. Passing the live socket ids
+  // lets the sweep drop "phantom" members whose socket vanished without a clean
+  // disconnect, so a room can never stay alive with nobody actually in it.
+  setInterval(() => {
+    const connected = new Set(io.sockets.sockets.keys());
+    const deleted = sweepRooms(connected);
+    if (deleted > 0) {
+      console.log(`Room sweeper: reclaimed ${deleted} empty room(s).`);
+    }
+  }, 30000).unref();
+
   // Broadcasts a system message to a room and stores it in history
   function broadcastSystemMessage(roomId, text) {
     const room = getRoomRaw(roomId);
