@@ -15,6 +15,8 @@ import {
   resetAudioUnlock
 } from '../utils/audio';
 import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
+import { monitorCallConnection, checkCallsOnResume } from '../utils/webrtcRecovery';
+import type { RecoveryCallbacks } from '../utils/webrtcRecovery';
 import {
   SCREEN_SHARE_PRESETS,
   DEFAULT_SCREEN_QUALITY,
@@ -281,6 +283,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const socketUsersRef = useRef<Set<string>>(new Set());
   // Peer IDs of room members, used to authorize incoming file-transfer connections
   const allowedPeerIdsRef = useRef<Set<string>>(new Set());
+  // socketId -> peerId, needed to re-establish a call from scratch when its
+  // RTCPeerConnection becomes unrecoverable (see monitorCallConnection below)
+  const socketToPeerIdRef = useRef<Map<string, string>>(new Map());
   // True once we have successfully joined at least once (enables rejoin on reconnect)
   const hasJoinedRef = useRef(false);
 
@@ -664,6 +669,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     let localStream: MediaStream | null = null;
     let socket: Socket | null = null;
     let peer: Peer | null = null;
+    // Declared here (not inside initConnections) so the cleanup below can
+    // remove it regardless of where in setup it ends up being assigned.
+    let visibilityHandler: (() => void) | null = null;
 
     const initConnections = async () => {
       try {
@@ -729,6 +737,64 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           }
         });
 
+        // 4.4. WebRTC connection recovery (see utils/webrtcRecovery.ts for why:
+        // mobile OSes suspend a backgrounded tab's networking, and WebRTC does
+        // not recover from that on its own). recreateCallToPeer and
+        // monitorCallConnection reference each other; safe because neither is
+        // invoked until after both are assigned below (only from async event
+        // callbacks that fire later).
+        const recoveryCallbacks: RecoveryCallbacks = {
+          recreateCall: (socketId) => recreateCallToPeer(socketId),
+          isCurrentCall: (socketId, call) => !isCancelled && activeCalls.current[socketId] === call,
+          isRoomMember: (socketId) => socketUsersRef.current.has(socketId),
+          onLog: (msg) => console.warn(`[windwatch-webrtc] ${msg}`)
+        };
+
+        const recreateCallToPeer = (socketId: string) => {
+          if (isCancelled || !peer || !localStream) return;
+          const targetPeerId = socketToPeerIdRef.current.get(socketId);
+          if (!targetPeerId) return;
+
+          const stale = activeCalls.current[socketId];
+          if (stale) {
+            try { stale.close(); } catch { /* already closed */ }
+          }
+
+          console.warn(`[windwatch-webrtc] Re-establishing call to ${socketId} (${targetPeerId})`);
+          const call = peer.call(targetPeerId, getActiveStream(), {
+            metadata: { callerSocketId: socket?.id, callerUsername: username }
+          });
+
+          call.on('stream', (remoteStream: MediaStream) => {
+            if (isCancelled) return;
+            setParticipants(prev => prev.map(p => (p.socketId === socketId ? { ...p, stream: remoteStream } : p)));
+          });
+
+          activeCalls.current[socketId] = call;
+          monitorCallConnection(socketId, call, recoveryCallbacks);
+          if (screenStreamRef.current) applyScreenEncodingToCall(call);
+        };
+
+        // 4.45. Proactive check on resume: connectionstatechange events can be
+        // delayed or coalesced while the tab's JS was frozen in the background,
+        // so re-verify every call the moment the tab becomes visible again
+        // rather than waiting on events that may arrive late (or not at all).
+        visibilityHandler = () => {
+          if (isCancelled || document.visibilityState !== 'visible') return;
+
+          if (peer?.disconnected) {
+            try { peer.reconnect(); } catch (err) { console.warn('PeerJS reconnect failed:', err); }
+          }
+
+          // Give the signalling socket a moment to come back up before poking
+          // individual calls, so a restart/recreate has somewhere to send to.
+          window.setTimeout(() => {
+            if (isCancelled) return;
+            checkCallsOnResume(activeCalls.current, recoveryCallbacks);
+          }, 1000);
+        };
+        document.addEventListener('visibilitychange', visibilityHandler);
+
         // 4.5. Handle incoming P2P file transfer connection requests
         peer.on('connection', (conn) => {
           if (conn.label !== 'file-transfer') return;
@@ -778,6 +844,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
             if (callerSocketId) {
               activeCalls.current[callerSocketId] = call;
+              monitorCallConnection(callerSocketId, call, recoveryCallbacks);
             }
           };
 
@@ -812,10 +879,14 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           // Update active socket users / peer id whitelist caches
           socketUsersRef.current.clear();
           allowedPeerIdsRef.current.clear();
+          socketToPeerIdRef.current.clear();
           roomUsers.forEach((u: any) => {
             if (u.socketId !== socket?.id) {
               socketUsersRef.current.add(u.socketId);
-              if (u.peerId) allowedPeerIdsRef.current.add(u.peerId);
+              if (u.peerId) {
+                allowedPeerIdsRef.current.add(u.peerId);
+                socketToPeerIdRef.current.set(u.socketId, u.peerId);
+              }
             }
           });
 
@@ -852,7 +923,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
           // Whitelist new socket user + peer id
           socketUsersRef.current.add(socketId);
-          if (peerId) allowedPeerIdsRef.current.add(peerId);
+          if (peerId) {
+            allowedPeerIdsRef.current.add(peerId);
+            socketToPeerIdRef.current.set(socketId, peerId);
+          }
 
           // Add to participant list first (as loader or just tag)
           setParticipants(prev => {
@@ -887,6 +961,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
             // Store call
             activeCalls.current[socketId] = call;
+            monitorCallConnection(socketId, call, recoveryCallbacks);
 
             // If a screen share is already running, this new peer must get the
             // screen-share encoder profile too — otherwise late joiners see a
@@ -971,6 +1046,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
           // Remove from whitelists
           socketUsersRef.current.delete(socketId);
+          socketToPeerIdRef.current.delete(socketId);
           setParticipants(prev => {
             const leaving = prev.find(p => p.socketId === socketId);
             if (leaving?.peerId) allowedPeerIdsRef.current.delete(leaving.peerId);
@@ -1011,6 +1087,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     return () => {
       isCancelled = true;
       console.log('Cleaning up room connections...');
+
+      if (visibilityHandler) {
+        document.removeEventListener('visibilitychange', visibilityHandler);
+      }
 
       // Stop all tracks in camera stream
       if (localStream) {
