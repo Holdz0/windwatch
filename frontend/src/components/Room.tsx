@@ -14,6 +14,7 @@ import {
   primeAudioUnlock,
   resetAudioUnlock
 } from '../utils/audio';
+import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
 import {
   SCREEN_SHARE_PRESETS,
   DEFAULT_SCREEN_QUALITY,
@@ -318,6 +319,14 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         pipWindowRef.current.close();
       }
     };
+  }, []);
+
+  // Keep the screen from sleeping/locking for the duration of the call —
+  // otherwise mobile browsers dim and lock the screen mid-conversation even
+  // though audio/video is actively streaming.
+  useEffect(() => {
+    startWakeLock();
+    return stopWakeLock;
   }, []);
 
   // Request desktop notification permission on the first user gesture —
