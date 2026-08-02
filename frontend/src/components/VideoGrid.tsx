@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   MicOff, VideoOff, Shield, Maximize, Minimize,
   Pin, Trash2, VolumeX, Volume1, Volume2, Tv, Activity
@@ -30,7 +30,12 @@ const LIMITATION_LABELS: Record<string, string> = {
   other: 'Sınırlı'
 };
 
-// Sub-component to manage individual participant streams and hooks
+// Sub-component to manage individual participant streams and hooks.
+//
+// The callbacks take the socketId rather than closing over it, so VideoGrid can
+// pass the same stable function identity to every card. With per-card arrow
+// functions the memo below would never hit — and the stats timer re-renders
+// this tree every 4 seconds, which on mobile is a real battery cost.
 interface ParticipantCardProps {
   p: Participant;
   isMe: boolean;
@@ -39,14 +44,14 @@ interface ParticipantCardProps {
   localIsHost: boolean;
   isFullscreen: boolean;
   isPinned: boolean;
-  onToggleFullscreen: () => void;
-  onTogglePin: () => void;
-  onKick: () => void;
-  onRemoteMute: (trackKind: 'audio' | 'video') => void;
+  onToggleFullscreen: (socketId: string) => void;
+  onTogglePin: (socketId: string) => void;
+  onKick: (socketId: string) => void;
+  onRemoteMute: (socketId: string, trackKind: 'audio' | 'video') => void;
   screenShareStats?: ScreenShareStats | null;
 }
 
-const ParticipantCard: React.FC<ParticipantCardProps> = ({
+const ParticipantCardComponent: React.FC<ParticipantCardProps> = ({
   p,
   isMe,
   isHost,
@@ -275,19 +280,19 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
     <div 
       id={`video-card-${p.socketId}`} 
       className={`video-card ${isScreen ? 'screen-share' : ''} ${isSpeaking ? 'speaking-active' : ''} ${isPinned ? 'pinned' : ''}`}
-      onDoubleClick={onTogglePin}
+      onDoubleClick={() => onTogglePin(p.socketId)}
     >
       {/* Top Left Menu Actions */}
       <div className="card-top-left-actions">
         <button 
-          onClick={(e) => { e.stopPropagation(); onToggleFullscreen(); }}
+          onClick={(e) => { e.stopPropagation(); onToggleFullscreen(p.socketId); }}
           className="fullscreen-btn"
           title={isFullscreen ? 'Tam Ekrandan Çık' : 'Tam Ekran Yap'}
         >
           {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
         </button>
         <button 
-          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+          onClick={(e) => { e.stopPropagation(); onTogglePin(p.socketId); }}
           className={`pin-btn ${isPinned ? 'active' : ''}`}
           title={isPinned ? 'Yayını Sabitlemeden Çıkar' : 'Yayını Ekrana Sabitle'}
         >
@@ -416,21 +421,21 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
         <div className="moderator-card-controls">
           <button 
             className="mod-action-btn mute"
-            onClick={(e) => { e.stopPropagation(); onRemoteMute('audio'); }}
+            onClick={(e) => { e.stopPropagation(); onRemoteMute(p.socketId, 'audio'); }}
             title="Kullanıcının Sesini Kapat"
           >
             <VolumeX size={14} />
           </button>
           <button 
             className="mod-action-btn camera-off"
-            onClick={(e) => { e.stopPropagation(); onRemoteMute('video'); }}
+            onClick={(e) => { e.stopPropagation(); onRemoteMute(p.socketId, 'video'); }}
             title="Kullanıcının Kamerasını Kapat"
           >
             <VideoOff size={14} />
           </button>
           <button 
             className="mod-action-btn kick danger"
-            onClick={(e) => { e.stopPropagation(); onKick(); }}
+            onClick={(e) => { e.stopPropagation(); onKick(p.socketId); }}
             title="Kullanıcıyı Odadan At"
           >
             <Trash2 size={14} />
@@ -453,7 +458,49 @@ const ParticipantCard: React.FC<ParticipantCardProps> = ({
   );
 };
 
-const VideoGrid: React.FC<VideoGridProps> = ({ 
+// Memoised with a value-based comparison of the stats objects: the stats timer
+// builds a fresh object every 4 seconds, so reference equality alone would
+// re-render every card on every tick even when the numbers are identical.
+// Everything else is compared by reference, which is correct — participant
+// objects and streams are replaced (not mutated) when they genuinely change.
+const ParticipantCard = React.memo(ParticipantCardComponent, (prev, next) => {
+  if (
+    prev.p !== next.p ||
+    prev.isMe !== next.isMe ||
+    prev.isHost !== next.isHost ||
+    prev.localIsHost !== next.localIsHost ||
+    prev.isFullscreen !== next.isFullscreen ||
+    prev.isPinned !== next.isPinned ||
+    prev.onToggleFullscreen !== next.onToggleFullscreen ||
+    prev.onTogglePin !== next.onTogglePin ||
+    prev.onKick !== next.onKick ||
+    prev.onRemoteMute !== next.onRemoteMute
+  ) {
+    return false;
+  }
+
+  const a = prev.stats;
+  const b = next.stats;
+  if ((a === undefined) !== (b === undefined)) return false;
+  if (a && b && (a.rtt !== b.rtt || a.packetLoss !== b.packetLoss)) return false;
+
+  const sa = prev.screenShareStats;
+  const sb = next.screenShareStats;
+  if ((sa == null) !== (sb == null)) return false;
+  if (sa && sb && (
+    sa.width !== sb.width ||
+    sa.height !== sb.height ||
+    sa.fps !== sb.fps ||
+    sa.kbps !== sb.kbps ||
+    sa.limitation !== sb.limitation
+  )) {
+    return false;
+  }
+
+  return true; // props are equivalent — skip the re-render
+});
+
+const VideoGridComponent: React.FC<VideoGridProps> = ({
   participants, 
   hostSocketId, 
   mySocketId, 
@@ -477,7 +524,9 @@ const VideoGrid: React.FC<VideoGridProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  const handleToggleFullscreen = (socketId: string) => {
+  // These are handed to every card, so their identity must be stable or the
+  // memo on ParticipantCard can never hit.
+  const handleToggleFullscreen = useCallback((socketId: string) => {
     const element = document.getElementById(`video-card-${socketId}`);
     if (!element) return;
 
@@ -490,11 +539,19 @@ const VideoGrid: React.FC<VideoGridProps> = ({
         setFullscreenSocketId(socketId);
       }).catch(err => console.error('Fullscreen request error:', err));
     }
-  };
+  }, []);
 
-  const handleTogglePin = (socketId: string) => {
+  const handleTogglePin = useCallback((socketId: string) => {
     setPinnedSocketId(prev => (prev === socketId ? null : socketId));
-  };
+  }, []);
+
+  const handleKick = useCallback((socketId: string) => {
+    onKickUser?.(socketId);
+  }, [onKickUser]);
+
+  const handleRemoteMute = useCallback((socketId: string, trackKind: 'audio' | 'video') => {
+    onRemoteMute?.(socketId, trackKind);
+  }, [onRemoteMute]);
 
   const getGridClass = () => {
     const count = participants.length;
@@ -523,11 +580,11 @@ const VideoGrid: React.FC<VideoGridProps> = ({
             localIsHost={!!localIsHost}
             isFullscreen={fullscreenSocketId === focusedUser.socketId}
             isPinned={pinnedSocketId === focusedUser.socketId}
-            onToggleFullscreen={() => handleToggleFullscreen(focusedUser.socketId)}
-            onTogglePin={() => handleTogglePin(focusedUser.socketId)}
-            onKick={() => onKickUser?.(focusedUser.socketId)}
-            onRemoteMute={(trackKind) => onRemoteMute?.(focusedUser.socketId, trackKind)}
-            screenShareStats={screenShareStats}
+            onToggleFullscreen={handleToggleFullscreen}
+            onTogglePin={handleTogglePin}
+            onKick={handleKick}
+            onRemoteMute={handleRemoteMute}
+            screenShareStats={focusedUser.socketId === 'local' ? screenShareStats : undefined}
           />
         </div>
         {otherUsers.length > 0 && !hideThumbnails && (
@@ -542,11 +599,11 @@ const VideoGrid: React.FC<VideoGridProps> = ({
                 localIsHost={!!localIsHost}
                 isFullscreen={fullscreenSocketId === p.socketId}
                 isPinned={pinnedSocketId === p.socketId}
-                onToggleFullscreen={() => handleToggleFullscreen(p.socketId)}
-                onTogglePin={() => handleTogglePin(p.socketId)}
-                onKick={() => onKickUser?.(p.socketId)}
-                onRemoteMute={(trackKind) => onRemoteMute?.(p.socketId, trackKind)}
-                screenShareStats={screenShareStats}
+                onToggleFullscreen={handleToggleFullscreen}
+                onTogglePin={handleTogglePin}
+                onKick={handleKick}
+                onRemoteMute={handleRemoteMute}
+                screenShareStats={p.socketId === 'local' ? screenShareStats : undefined}
               />
             ))}
           </div>
@@ -568,15 +625,17 @@ const VideoGrid: React.FC<VideoGridProps> = ({
           localIsHost={!!localIsHost}
           isFullscreen={fullscreenSocketId === p.socketId}
           isPinned={pinnedSocketId === p.socketId}
-          onToggleFullscreen={() => handleToggleFullscreen(p.socketId)}
-          onTogglePin={() => handleTogglePin(p.socketId)}
-          onKick={() => onKickUser?.(p.socketId)}
-          onRemoteMute={(trackKind) => onRemoteMute?.(p.socketId, trackKind)}
-          screenShareStats={screenShareStats}
+          onToggleFullscreen={handleToggleFullscreen}
+          onTogglePin={handleTogglePin}
+          onKick={handleKick}
+          onRemoteMute={handleRemoteMute}
+          screenShareStats={p.socketId === 'local' ? screenShareStats : undefined}
         />
       ))}
     </div>
   );
 };
+
+const VideoGrid = React.memo(VideoGridComponent);
 
 export default VideoGrid;

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import io, { Socket } from 'socket.io-client';
 import { Peer } from 'peerjs';
@@ -15,6 +15,8 @@ import {
   resetAudioUnlock
 } from '../utils/audio';
 import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
+import { startCallMediaSession, updateCallMediaSession } from '../utils/mediaSession';
+import { isMobileDevice } from '../utils/device';
 import { monitorCallConnection, checkCallsOnResume } from '../utils/webrtcRecovery';
 import type { RecoveryCallbacks } from '../utils/webrtcRecovery';
 import {
@@ -596,6 +598,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // Timer to fetch WebRTC statistics every 4 seconds
   useEffect(() => {
     const statsTimer = setInterval(async () => {
+      // getStats() on every peer connection is not free. While the tab is
+      // hidden nobody can see the result, so skip the work entirely — this is
+      // the single biggest background battery saving on mobile.
+      if (document.hidden) return;
+
       const calls = Object.entries(activeCalls.current);
       if (calls.length === 0) {
         // Avoid a re-render every tick when idle
@@ -653,7 +660,22 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         }
       }
 
-      setConnectionStats(statsMap);
+      // Only push new state when a number actually moved. RTT is quantised to
+      // whole milliseconds and often repeats tick after tick, so bailing out
+      // here removes most re-renders of the entire room tree.
+      setConnectionStats(prev => {
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(statsMap);
+        if (prevKeys.length === nextKeys.length) {
+          const unchanged = nextKeys.every(k => {
+            const a = prev[k];
+            const b = statsMap[k];
+            return a && b && a.rtt === b.rtt && a.packetLoss === b.packetLoss;
+          });
+          if (unchanged) return prev;
+        }
+        return statsMap;
+      });
 
       if (!isSharing) {
         setScreenShareStats(prev => (prev ? null : prev));
@@ -1222,7 +1244,16 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     if (isVideoMuted) {
       // Turn on camera
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        // Cap capture on phones: a modern handset will happily hand back 1080p+
+        // at 30fps, which it then has to encode every frame — the dominant cost
+        // in both battery and heat. 720p/24 is indistinguishable in a grid tile
+        // and dramatically cheaper. `ideal` (not `exact`) so a device that
+        // cannot do it still returns something rather than failing outright.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: isMobileDevice()
+            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } }
+            : true
+        });
         const realVideoTrack = stream.getVideoTracks()[0];
         if (!realVideoTrack) return;
 
@@ -1248,6 +1279,32 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       muteLocalVideo();
     }
   };
+
+  // Publish the call to the OS media controls (Android lock screen / notification
+  // shade). Registered once for the room; the handlers are read through refs so
+  // they always invoke the current toggles without re-registering.
+  const mediaSessionHandlersRef = useRef({ toggleAudio, toggleVideo, onLeave });
+  useEffect(() => {
+    mediaSessionHandlersRef.current = { toggleAudio, toggleVideo, onLeave };
+  });
+
+  useEffect(() => {
+    return startCallMediaSession({
+      onToggleMicrophone: () => mediaSessionHandlersRef.current.toggleAudio(),
+      onToggleCamera: () => mediaSessionHandlersRef.current.toggleVideo(),
+      onHangUp: () => mediaSessionHandlersRef.current.onLeave()
+    });
+  }, []);
+
+  // Keep the OS-level metadata and button states in sync
+  useEffect(() => {
+    updateCallMediaSession({
+      roomTitle: 'WindWatch görüşmesi',
+      participantCount: participants.length,
+      isMicrophoneActive: !isAudioMuted,
+      isCameraActive: !isVideoMuted
+    });
+  }, [participants.length, isAudioMuted, isVideoMuted]);
 
   // Screen Sharing logic: requests display stream and updates the tracks inside active peer calls
   const toggleScreenShare = async () => {
@@ -1523,19 +1580,21 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     }
   };
 
-  const handleSendMessage = (text: string) => {
+  // The handlers below are memoised because they are handed to the memoised
+  // VideoGrid/Chat/Controls; a fresh identity each render would defeat those.
+  const handleSendMessage = useCallback((text: string) => {
     if (socketRef.current && text.trim()) {
       socketRef.current.emit('send-message', { roomId, text });
     }
-  };
+  }, [roomId]);
 
-  const handleShareFile = (file: File) => {
+  const handleShareFile = useCallback((file: File) => {
     const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     localSharedFilesRef.current[fileId] = file;
     const meta: SharedFileMeta = { id: fileId, name: file.name, size: file.size, type: file.type };
     // Broadcast file offer metadata in chat channel
     handleSendMessage(`${FILE_MESSAGE_PREFIX}${JSON.stringify(meta)}`);
-  };
+  }, [handleSendMessage]);
 
   // Requests a shared file from its sender over a P2P data channel.
   // Resolves when the download completes; rejects on timeout, transfer errors,
@@ -1597,15 +1656,18 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     socketRef.current?.emit('toggle-lock-room');
   };
 
-  const handleKickUser = (targetSocketId: string) => {
+  const closeChat = useCallback(() => setIsChatOpen(false), []);
+  const toggleChat = useCallback(() => setIsChatOpen(v => !v), []);
+
+  const handleKickUser = useCallback((targetSocketId: string) => {
     if (confirm('Bu kullanıcıyı odadan atmak istediğinize emin misiniz?')) {
       socketRef.current?.emit('kick-user', { targetSocketId });
     }
-  };
+  }, []);
 
-  const handleRemoteMute = (targetSocketId: string, trackKind: 'audio' | 'video') => {
+  const handleRemoteMute = useCallback((targetSocketId: string, trackKind: 'audio' | 'video') => {
     socketRef.current?.emit('mute-user-request', { targetSocketId, trackKind });
-  };
+  }, []);
 
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1759,7 +1821,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                 onShareFile={handleShareFile}
                 onDownloadFile={handleDownloadFile}
                 myId={socketRef.current?.id || ''}
-                onClose={() => setIsChatOpen(false)}
+                onClose={closeChat}
                 isPiP={false}
               />
             </div>
@@ -1775,7 +1837,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           toggleAudio={toggleAudio}
           toggleVideo={toggleVideo}
           toggleScreenShare={toggleScreenShare}
-          toggleChat={() => setIsChatOpen(!isChatOpen)}
+          toggleChat={toggleChat}
           onLeave={onLeave}
           screenQuality={screenQuality}
           onChangeScreenQuality={changeScreenQuality}
@@ -1804,16 +1866,20 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           )
         ) : (
           <>
-            <div className="chat-backdrop" onClick={() => setIsChatOpen(false)} />
+            <div className="chat-backdrop" onClick={closeChat} />
             <Chat
               messages={chatMessages}
               onSendMessage={handleSendMessage}
               onShareFile={handleShareFile}
               onDownloadFile={handleDownloadFile}
               myId={socketRef.current?.id || ''}
-              onClose={() => setIsChatOpen(false)}
+              onClose={closeChat}
               onDetach={toggleChatPiP}
               isPiP={false}
+              // Bottom sheet on a phone held upright. In the short-landscape
+              // immersive layout the side overlay is the better fit — there is
+              // barely any vertical room for a sheet to travel.
+              isBottomSheet={isMobile && !isShortLandscape}
             />
           </>
         )

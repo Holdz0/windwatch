@@ -1,10 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="tr">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <!-- viewport-fit=cover is what lets env(safe-area-inset-*) report real values;
+         without it the notch/home-indicator insets are always 0 and the UI gets
+         clipped on iPhones. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Tints the mobile browser chrome to match the app background -->
+    <meta name="theme-color" content="#000000" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Hesap oluşturmadan anında sesli, görüntülü sohbet ve ekran paylaşımı." />
+    <!-- Full-bleed status bar when launched from the iOS home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="WindWatch" />
+    <title>WindWatch</title>
   </head>
   <body>
     <div id="root"></div>

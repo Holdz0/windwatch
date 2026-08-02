@@ -307,4 +307,6 @@ const Controls: React.FC<ControlsProps> = ({
   );
 };
 
-export default Controls;
+// Memoised: the room re-renders on stats/participant updates, and this
+// subtree is comparatively expensive to rebuild for no visual change.
+export default React.memo(Controls);

@@ -12,7 +12,14 @@ interface ChatProps {
   onClose: () => void;
   onDetach?: () => void;
   isPiP?: boolean;
+  /** Render as a draggable bottom sheet (mobile portrait) instead of a side panel */
+  isBottomSheet?: boolean;
 }
+
+// Resting position of the sheet when half-open, as a fraction of its height.
+const SHEET_HALF_OFFSET = 0.45;
+// Drag past this fraction of the sheet height (downwards) and it dismisses.
+const SHEET_DISMISS_THRESHOLD = 0.65;
 
 const Chat: React.FC<ChatProps> = ({ 
   messages, 
@@ -22,11 +29,76 @@ const Chat: React.FC<ChatProps> = ({
   myId, 
   onClose,
   onDetach,
-  isPiP = false
+  isPiP = false,
+  isBottomSheet = false
 }) => {
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // --- Bottom sheet drag ---------------------------------------------------
+  // Only the handle starts a drag, so the message list keeps its own natural
+  // scrolling — mixing the two is what makes hand-rolled sheets feel broken.
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  // Resting offset in px from the fully-open position (0 = full height)
+  const [sheetOffset, setSheetOffset] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{ startY: number; startOffset: number } | null>(null);
+
+  // The slide-in is driven through the same inline transform + CSS transition
+  // that the drag uses, rather than a keyframe animation. A keyframe would be a
+  // second owner of `transform` and would win over the inline value while it
+  // ran — so dragging during the entry did nothing, and if the animation was
+  // ever interrupted the sheet was left stranded off-screen.
+  const [hasEntered, setHasEntered] = useState(false);
+  useEffect(() => {
+    if (!isBottomSheet) {
+      setHasEntered(false);
+      return;
+    }
+    // One frame at the off-screen position, then transition to resting.
+    // A timeout backs up the rAF because rAF does not fire while the tab is
+    // hidden — without it, opening the chat and immediately switching apps
+    // would leave the sheet parked off-screen for the rest of the session.
+    const raf = requestAnimationFrame(() => setHasEntered(true));
+    const timer = window.setTimeout(() => setHasEntered(true), 80);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+    };
+  }, [isBottomSheet]);
+
+  const handleDragStart = (e: React.PointerEvent) => {
+    if (!isBottomSheet) return;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragRef.current = { startY: e.clientY, startOffset: sheetOffset };
+    setIsDragging(true);
+  };
+
+  const handleDragMove = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const delta = e.clientY - dragRef.current.startY;
+    // Never drag above the fully-open position
+    setSheetOffset(Math.max(0, dragRef.current.startOffset + delta));
+  };
+
+  const handleDragEnd = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setIsDragging(false);
+
+    const height = sheetRef.current?.offsetHeight ?? 0;
+    if (!height) return;
+
+    if (sheetOffset > height * SHEET_DISMISS_THRESHOLD) {
+      onClose();
+      setSheetOffset(0); // reset so it reopens fully next time
+      return;
+    }
+    // Snap to whichever resting point is nearer
+    const halfPx = height * SHEET_HALF_OFFSET;
+    setSheetOffset(sheetOffset > halfPx / 2 ? halfPx : 0);
+  };
 
   // Track downloading states: fileId -> boolean
   const [downloadingFiles, setDownloadingFiles] = useState<Record<string, boolean>>({});
@@ -95,7 +167,31 @@ const Chat: React.FC<ChatProps> = ({
   };
 
   return (
-    <div className="chat-panel">
+    <div
+      ref={sheetRef}
+      className={`chat-panel${isBottomSheet ? ' chat-sheet' : ''}${isDragging ? ' is-dragging' : ''}`}
+      style={
+        isBottomSheet
+          ? { transform: hasEntered ? `translateY(${sheetOffset}px)` : 'translateY(100%)' }
+          : undefined
+      }
+    >
+      {/* Drag handle — the only surface that initiates a sheet drag */}
+      {isBottomSheet && (
+        <div
+          className="chat-sheet-handle"
+          onPointerDown={handleDragStart}
+          onPointerMove={handleDragMove}
+          onPointerUp={handleDragEnd}
+          onPointerCancel={handleDragEnd}
+          role="button"
+          tabIndex={0}
+          aria-label="Sohbeti sürükle"
+        >
+          <span className="chat-sheet-grabber" />
+        </div>
+      )}
+
       {/* Header */}
       <div className="chat-header">
         <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
@@ -259,4 +355,6 @@ const Chat: React.FC<ChatProps> = ({
   );
 };
 
-export default Chat;
+// Memoised: the room re-renders on stats/participant updates, and this
+// subtree is comparatively expensive to rebuild for no visual change.
+export default React.memo(Chat);

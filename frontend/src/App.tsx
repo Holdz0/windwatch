@@ -1,6 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import Home from './components/Home';
-import Room from './components/Room';
+
+// Room pulls in peerjs + socket.io-client, which together dominate the bundle
+// and are useless until someone actually joins a room. Loading it lazily keeps
+// the landing screen — the only thing needed on first paint — small, which
+// matters most on mobile data.
+const Room = lazy(() => import('./components/Room'));
 
 // Extracts the room ID segment from the current URL path, if any
 function parseRoomIdFromPath(): string | null {
@@ -62,12 +67,14 @@ function App() {
           initialRoomId={roomId}
         />
       ) : (
-        <Room
-          roomId={roomId}
-          username={username}
-          initialPassword={roomPassword}
-          onLeave={handleLeaveRoom}
-        />
+        <Suspense fallback={<div className="app-loading"><span className="app-loading-spinner" /></div>}>
+          <Room
+            roomId={roomId}
+            username={username}
+            initialPassword={roomPassword}
+            onLeave={handleLeaveRoom}
+          />
+        </Suspense>
       )}
     </div>
   );
