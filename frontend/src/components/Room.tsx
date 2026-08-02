@@ -18,19 +18,20 @@ import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
 import { monitorCallConnection, checkCallsOnResume } from '../utils/webrtcRecovery';
 import type { RecoveryCallbacks } from '../utils/webrtcRecovery';
 import {
-  SCREEN_SHARE_PRESETS,
   DEFAULT_SCREEN_QUALITY,
+  DEFAULT_CUSTOM_SETTINGS,
   MIN_SCREEN_BITRATE,
   CAMERA_ENCODING,
   buildDisplayMediaConstraints,
   applyVideoEncoding,
   screenEncodingFor,
+  resolveScreenSharePreset,
   getDisplaySurface,
   canMixSystemAudio,
   SYSTEM_AUDIO_BLOCKED_HINT,
   DESKTOP_AUDIO_ECHO_HINT
 } from '../utils/screenShare';
-import type { ScreenShareQuality, ScreenShareStats } from '../utils/screenShare';
+import type { ScreenShareQuality, ScreenShareStats, CustomScreenShareSettings } from '../utils/screenShare';
 
 interface RoomProps {
   roomId: string;
@@ -155,6 +156,37 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
   const [screenShareStats, setScreenShareStats] = useState<ScreenShareStats | null>(null);
 
+  // Manual resolution/fps/bitrate profile for the 'custom' quality option. The
+  // numbers are remembered across sessions (tuning them once shouldn't need
+  // repeating), independent of which quality happens to be selected on join.
+  const [screenCustomSettings, setScreenCustomSettings] = useState<CustomScreenShareSettings>(() => {
+    try {
+      const raw = localStorage.getItem('windwatch:screenCustom');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (
+          typeof parsed?.maxHeight === 'number' &&
+          typeof parsed?.frameRate === 'number' &&
+          typeof parsed?.maxBitrate === 'number'
+        ) {
+          return parsed;
+        }
+      }
+    } catch {
+      // corrupted/old-format storage — fall through to the default
+    }
+    return DEFAULT_CUSTOM_SETTINGS;
+  });
+  const screenCustomSettingsRef = useRef(screenCustomSettings);
+  useEffect(() => {
+    screenCustomSettingsRef.current = screenCustomSettings;
+    try {
+      localStorage.setItem('windwatch:screenCustom', JSON.stringify(screenCustomSettings));
+    } catch {
+      // storage unavailable (private mode) — the preference just won't persist
+    }
+  }, [screenCustomSettings]);
+
   // Opt-in for sharing desktop application audio (Steam/Discord/game sound).
   // It is the only way to capture a native app's sound, but it also captures the
   // call itself, so it stays off until the user asks for it. Remembered across
@@ -263,7 +295,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   }, [screenQuality]);
 
   // Bitrate actually in use — adapted downwards when the network can't keep up
-  const activeBitrateRef = useRef<number>(SCREEN_SHARE_PRESETS[DEFAULT_SCREEN_QUALITY].maxBitrate);
+  const activeBitrateRef = useRef<number>(
+    resolveScreenSharePreset(DEFAULT_SCREEN_QUALITY, DEFAULT_CUSTOM_SETTINGS).maxBitrate
+  );
   const prevOutboundRef = useRef<{ bytes: number; timestamp: number } | null>(null);
 
   // Mic + system audio mixer nodes on the shared AudioContext
@@ -416,7 +450,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       return;
     }
 
-    const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+    const preset = resolveScreenSharePreset(screenQualityRef.current, screenCustomSettingsRef.current);
     applyVideoEncoding(sender, screenEncodingFor(preset, activeBitrateRef.current));
   };
 
@@ -642,8 +676,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         });
 
         // Adaptive bitrate: back off when the network is the bottleneck, then
-        // creep back up once the encoder stops reporting a limitation.
-        const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+        // creep back up once the encoder stops reporting a limitation. In
+        // 'custom' mode the ceiling is whatever the user manually set — this
+        // still protects against real congestion, it just never creeps above
+        // the number they chose.
+        const preset = resolveScreenSharePreset(screenQualityRef.current, screenCustomSettingsRef.current);
         const current = activeBitrateRef.current;
         let next = current;
 
@@ -1219,7 +1256,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       return;
     }
 
-    const preset = SCREEN_SHARE_PRESETS[screenQualityRef.current];
+    const preset = resolveScreenSharePreset(screenQualityRef.current, screenCustomSettingsRef.current);
     let stream: MediaStream;
 
     try {
@@ -1350,7 +1387,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     setScreenQuality(quality);
     screenQualityRef.current = quality;
 
-    const preset = SCREEN_SHARE_PRESETS[quality];
+    const preset = resolveScreenSharePreset(quality, screenCustomSettingsRef.current);
     activeBitrateRef.current = preset.maxBitrate;
 
     const stream = screenStreamRef.current;
@@ -1372,6 +1409,20 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     }
 
     applyScreenEncodingToAllCalls();
+  };
+
+  // Applies an edit from the custom resolution/fps/bitrate sliders. Always
+  // updates the remembered numbers; only re-negotiates live if 'custom' is
+  // actually the active quality (editing a profile you're not using shouldn't
+  // touch anything mid-share).
+  const applyCustomScreenSettings = (partial: Partial<CustomScreenShareSettings>) => {
+    const next = { ...screenCustomSettingsRef.current, ...partial };
+    screenCustomSettingsRef.current = next;
+    setScreenCustomSettings(next);
+
+    if (screenQualityRef.current === 'custom') {
+      changeScreenQuality('custom');
+    }
   };
 
   const stopScreenSharing = () => {
@@ -1731,6 +1782,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           screenShareBlockedBy={remoteSharer?.username}
           allowDesktopAudio={allowDesktopAudio}
           onToggleDesktopAudio={setAllowDesktopAudio}
+          screenCustomSettings={screenCustomSettings}
+          onChangeCustomScreenSettings={applyCustomScreenSettings}
         />
       </div>
 

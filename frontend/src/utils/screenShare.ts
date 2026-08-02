@@ -6,7 +6,9 @@
 // these levers — contentHint, degradationPreference, maxFramerate and maxBitrate —
 // so each preset drives all of them consistently.
 
-export type ScreenShareQuality = 'detail' | 'balanced' | 'motion';
+export type BuiltInScreenShareQuality = 'detail' | 'balanced' | 'motion';
+/** 'custom' resolves through resolveScreenSharePreset() using the user's own numbers. */
+export type ScreenShareQuality = BuiltInScreenShareQuality | 'custom';
 
 export interface ScreenSharePreset {
   id: ScreenShareQuality;
@@ -21,7 +23,7 @@ export interface ScreenSharePreset {
   degradationPreference: RTCDegradationPreference;
 }
 
-export const SCREEN_SHARE_PRESETS: Record<ScreenShareQuality, ScreenSharePreset> = {
+export const SCREEN_SHARE_PRESETS: Record<BuiltInScreenShareQuality, ScreenSharePreset> = {
   detail: {
     id: 'detail',
     label: 'Metin & Kod',
@@ -61,6 +63,82 @@ export const DEFAULT_SCREEN_QUALITY: ScreenShareQuality = 'balanced';
 
 /** Adaptive bitrate never drops below this — under it the share is unreadable anyway. */
 export const MIN_SCREEN_BITRATE = 500_000;
+
+// --- Custom (manual) profile -----------------------------------------------
+//
+// The three presets above cover the common cases; power users on a strong
+// connection (or a deliberately poor one) may want to pick exact numbers
+// instead. 'custom' resolves to a preset built from these numbers rather than
+// a fixed table entry — everything downstream (capture constraints, encoder
+// params, adaptive bitrate) already just consumes a ScreenSharePreset, so no
+// other code needs to know custom mode exists.
+
+export interface CustomScreenShareSettings {
+  maxHeight: number;
+  frameRate: number;
+  maxBitrate: number;
+}
+
+export const DEFAULT_CUSTOM_SETTINGS: CustomScreenShareSettings = {
+  maxHeight: 1080,
+  frameRate: 30,
+  maxBitrate: 4_000_000
+};
+
+// Curated resolution/fps choices rather than free-form numbers: a capture
+// request for an arbitrary height (e.g. 1032p) buys nothing since the source
+// display doesn't have that resolution anyway, and round numbers read better.
+export const CUSTOM_RESOLUTION_OPTIONS: { label: string; height: number }[] = [
+  { label: '480p', height: 480 },
+  { label: '720p (HD)', height: 720 },
+  { label: '900p', height: 900 },
+  { label: '1080p (Full HD)', height: 1080 },
+  { label: '1440p (2K)', height: 1440 },
+  { label: '2160p (4K)', height: 2160 }
+];
+
+export const CUSTOM_FRAMERATE_OPTIONS: number[] = [5, 10, 15, 24, 30, 45, 60];
+
+// Bitrate is a genuine continuum (unlike resolution/fps, there's no natural set
+// of "correct" stops), so it's the one true slider — floor kept below
+// MIN_SCREEN_BITRATE to let someone on a very poor link go lower than the
+// adaptive algorithm's own backoff floor if they choose to.
+export const CUSTOM_BITRATE_BOUNDS = { min: 200_000, max: 15_000_000, step: 100_000 };
+
+/** 16:9 width for a given height, rounded to an even number (codecs prefer even dimensions). */
+function widthFor16by9(height: number): number {
+  return Math.round((height * 16) / 9 / 2) * 2;
+}
+
+function degradationPreferenceForFrameRate(frameRate: number): RTCDegradationPreference {
+  if (frameRate <= 15) return 'maintain-resolution';
+  if (frameRate >= 45) return 'maintain-framerate';
+  return 'balanced';
+}
+
+/** Builds the full preset for the custom profile from the user's chosen numbers. */
+export function buildCustomPreset(settings: CustomScreenShareSettings): ScreenSharePreset {
+  return {
+    id: 'custom',
+    label: 'Özel',
+    hint: 'Çözünürlük, kare hızı ve bitrate elle ayarlanır.',
+    contentHint: settings.frameRate <= 15 ? 'detail' : 'motion',
+    maxWidth: widthFor16by9(settings.maxHeight),
+    maxHeight: settings.maxHeight,
+    frameRate: settings.frameRate,
+    maxBitrate: settings.maxBitrate,
+    degradationPreference: degradationPreferenceForFrameRate(settings.frameRate)
+  };
+}
+
+/** Resolves the active quality selection (built-in or custom) to a full preset. */
+export function resolveScreenSharePreset(
+  quality: ScreenShareQuality,
+  custom: CustomScreenShareSettings
+): ScreenSharePreset {
+  if (quality === 'custom') return buildCustomPreset(custom);
+  return SCREEN_SHARE_PRESETS[quality];
+}
 
 /** Encoder settings used for the camera, restored when a screen share ends. */
 export const CAMERA_ENCODING = {

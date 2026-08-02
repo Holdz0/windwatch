@@ -2214,3 +2214,63 @@ body {
   gap: 2px;
 }
 
+
+/* Custom (manual) screen-share profile: resolution/fps selects + bitrate slider,
+   shown inside the quality popover when "Özel" is selected. */
+.custom-screen-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 10px 10px;
+  margin-bottom: 2px;
+}
+
+.custom-setting-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.custom-setting-row-bitrate {
+  /* not a <label> like the selects — no cursor:pointer semantics needed */
+}
+
+.custom-setting-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.custom-setting-value {
+  font-family: monospace;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  font-size: 0.72rem;
+}
+
+.custom-setting-select {
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--tint-surface);
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.custom-setting-select:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 1px;
+}
+
+.custom-setting-slider {
+  width: 100%;
+  height: 4px;
+  accent-color: var(--color-blue);
+  cursor: pointer;
+}
