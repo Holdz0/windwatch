@@ -14,3 +14,41 @@ export function isMobileDevice(): boolean {
   const shortEdge = Math.min(window.screen?.width ?? 0, window.screen?.height ?? 0);
   return coarsePointer && shortEdge > 0 && shortEdge <= 820;
 }
+
+/** Which physical camera to open: front-facing or rear-facing. */
+export type FacingMode = 'user' | 'environment';
+
+/**
+ * Builds getUserMedia constraints for the camera.
+ *
+ * Capture is capped on phone-class devices because encoding every frame is the
+ * dominant battery/heat cost, and 720p/24 is indistinguishable in a grid tile.
+ *
+ * `strictFacing` decides how hard we insist on the requested camera:
+ *  - false (turning the camera on): `ideal`, so a device that cannot honour the
+ *    request still returns *a* camera rather than failing outright.
+ *  - true (explicitly switching): `exact`, because the whole point of the action
+ *    is to land on the other camera — silently reopening the same one would look
+ *    like a broken button.
+ *
+ * `mobile` is injectable so this stays a pure function and can be tested
+ * without a DOM.
+ */
+export function buildCameraConstraints(
+  facingMode: FacingMode,
+  strictFacing: boolean,
+  mobile: boolean = isMobileDevice()
+): MediaStreamConstraints {
+  if (!mobile) {
+    // Desktops generally expose a single webcam with no meaningful facingMode
+    return { video: true };
+  }
+  return {
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 24, max: 30 },
+      facingMode: strictFacing ? { exact: facingMode } : { ideal: facingMode }
+    }
+  };
+}

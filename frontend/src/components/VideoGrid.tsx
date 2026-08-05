@@ -367,6 +367,7 @@ const ParticipantCardComponent: React.FC<ParticipantCardProps> = ({
           autoPlay
           playsInline
           muted
+          className={p.isMirrored ? 'is-mirrored' : undefined}
           style={showVideo ? undefined : { display: 'none' }}
         />
       )}

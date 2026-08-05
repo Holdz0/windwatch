@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Mic, MicOff, Video, VideoOff,
-  Monitor, MessageSquare, LogOut, Settings2, SlidersHorizontal
+  Monitor, MessageSquare, LogOut, Settings2, SlidersHorizontal, SwitchCamera
 } from 'lucide-react';
 import {
   SCREEN_SHARE_PRESETS,
@@ -30,6 +30,11 @@ interface ControlsProps {
   onToggleDesktopAudio: (enabled: boolean) => void;
   screenCustomSettings: CustomScreenShareSettings;
   onChangeCustomScreenSettings: (partial: Partial<CustomScreenShareSettings>) => void;
+  /** Shown only on devices that actually have a second camera, while it is on */
+  canSwitchCamera: boolean;
+  isSwitchingCamera: boolean;
+  facingMode: 'user' | 'environment';
+  onSwitchCamera: () => void;
 }
 
 const QUALITY_ORDER: BuiltInScreenShareQuality[] = ['detail', 'balanced', 'motion'];
@@ -71,7 +76,11 @@ const Controls: React.FC<ControlsProps> = ({
   allowDesktopAudio,
   onToggleDesktopAudio,
   screenCustomSettings,
-  onChangeCustomScreenSettings
+  onChangeCustomScreenSettings,
+  canSwitchCamera,
+  isSwitchingCamera,
+  facingMode,
+  onSwitchCamera
 }) => {
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
   const qualityMenuRef = useRef<HTMLDivElement | null>(null);
@@ -135,6 +144,21 @@ const Controls: React.FC<ControlsProps> = ({
       >
         {isVideoMuted ? <VideoOff size={20} /> : <Video size={20} />}
       </button>
+
+      {/* Front/rear camera switch — only rendered when the device has a second
+          camera and it is currently on, so it never appears as a dead control */}
+      {canSwitchCamera && (
+        <button
+          type="button"
+          onClick={onSwitchCamera}
+          disabled={isSwitchingCamera}
+          className={`ctrl-btn ctrl-flip ${isSwitchingCamera ? 'is-disabled' : ''}`}
+          title={facingMode === 'user' ? 'Arka Kameraya Geç' : 'Ön Kameraya Geç'}
+          aria-label={facingMode === 'user' ? 'Arka kameraya geç' : 'Ön kameraya geç'}
+        >
+          <SwitchCamera size={20} />
+        </button>
+      )}
 
       {/* Screen Share Button */}
       <button

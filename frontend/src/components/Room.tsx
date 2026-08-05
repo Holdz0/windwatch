@@ -16,7 +16,8 @@ import {
 } from '../utils/audio';
 import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
 import { startCallMediaSession, updateCallMediaSession } from '../utils/mediaSession';
-import { isMobileDevice } from '../utils/device';
+import { isMobileDevice, buildCameraConstraints } from '../utils/device';
+import type { FacingMode } from '../utils/device';
 import { monitorCallConnection, checkCallsOnResume } from '../utils/webrtcRecovery';
 import type { RecoveryCallbacks } from '../utils/webrtcRecovery';
 import {
@@ -51,6 +52,9 @@ export interface Participant {
   isAudioMuted?: boolean;
   isVideoMuted?: boolean;
   isScreenSharing?: boolean;
+  /** Mirror the local preview — the convention for a front-facing camera.
+   *  Only ever set on our own tile; remote peers see us unmirrored. */
+  isMirrored?: boolean;
 }
 
 export interface ChatMessage {
@@ -152,6 +156,42 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   const [isVideoMuted, setIsVideoMuted] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(true);
+
+  // Front/rear camera. Phones start on the front camera, the same as every
+  // other call app. The ref mirrors it for use inside async handlers.
+  const [facingMode, setFacingMode] = useState<FacingMode>('user');
+  const facingModeRef = useRef<FacingMode>('user');
+  useEffect(() => {
+    facingModeRef.current = facingMode;
+  }, [facingMode]);
+
+  // Only worth offering the switch when the device actually has a second camera
+  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const [isSwitchingCamera, setIsSwitchingCamera] = useState(false);
+
+  useEffect(() => {
+    if (!isMobileDevice() || !navigator.mediaDevices?.enumerateDevices) return;
+    let cancelled = false;
+
+    const detect = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
+        setHasMultipleCameras(devices.filter(d => d.kind === 'videoinput').length > 1);
+      } catch {
+        // Enumeration blocked — leave the switch hidden rather than guessing
+      }
+    };
+
+    detect();
+    // Re-run whenever the camera is turned on: before permission is granted the
+    // browser reports a redacted device list, which can undercount cameras.
+    navigator.mediaDevices.addEventListener?.('devicechange', detect);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener?.('devicechange', detect);
+    };
+  }, [isVideoMuted]);
 
   // Screen share tuning: the preset drives capture constraints and encoder behaviour,
   // and the live stats let the sharer see what viewers are actually receiving.
@@ -1244,16 +1284,9 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     if (isVideoMuted) {
       // Turn on camera
       try {
-        // Cap capture on phones: a modern handset will happily hand back 1080p+
-        // at 30fps, which it then has to encode every frame — the dominant cost
-        // in both battery and heat. 720p/24 is indistinguishable in a grid tile
-        // and dramatically cheaper. `ideal` (not `exact`) so a device that
-        // cannot do it still returns something rather than failing outright.
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: isMobileDevice()
-            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } }
-            : true
-        });
+        const stream = await navigator.mediaDevices.getUserMedia(
+          buildCameraConstraints(facingModeRef.current, false)
+        );
         const realVideoTrack = stream.getVideoTracks()[0];
         if (!realVideoTrack) return;
 
@@ -1268,7 +1301,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         }
 
         setIsVideoMuted(false);
-        updateLocalParticipant({ isVideoMuted: false, stream: getActiveStream() });
+        updateLocalParticipant({
+          isVideoMuted: false,
+          stream: getActiveStream(),
+          isMirrored: isMobileDevice() && facingModeRef.current === 'user'
+        });
         emitMediaState({ isVideoMuted: false });
       } catch (err) {
         console.error('Kamera erişimi alınamadı:', err);
@@ -1279,6 +1316,66 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       muteLocalVideo();
     }
   };
+
+  // Swap between the front and rear camera.
+  //
+  // The current track is released *before* opening the other camera: most phones
+  // cannot hold both open at once, so requesting the second while the first is
+  // live fails on a lot of hardware. That leaves a window where we have no
+  // camera, so a failure path restores the one we just gave up rather than
+  // silently leaving the user dark.
+  const switchCamera = useCallback(async () => {
+    const localStream = localStreamRef.current;
+    if (!localStream || isVideoMutedRef.current || isSwitchingCamera) return;
+
+    const previous = facingModeRef.current;
+    const target: FacingMode = previous === 'user' ? 'environment' : 'user';
+    setIsSwitchingCamera(true);
+
+    const oldTrack = localStream.getVideoTracks()[0];
+    stopMediaTrack(oldTrack);
+    if (oldTrack) localStream.removeTrack(oldTrack);
+
+    const attach = (track: MediaStreamTrack, mode: FacingMode) => {
+      localStream.addTrack(track);
+      // While screen sharing, the share owns the outgoing video track
+      if (!screenStreamRef.current) replaceVideoSenders(track);
+      facingModeRef.current = mode;
+      setFacingMode(mode);
+      updateLocalParticipant({
+        stream: getActiveStream(),
+        isMirrored: isMobileDevice() && mode === 'user'
+      });
+    };
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(buildCameraConstraints(target, true));
+      const newTrack = stream.getVideoTracks()[0];
+      if (!newTrack) throw new Error('No video track returned for the requested camera');
+      attach(newTrack, target);
+    } catch (err) {
+      console.warn('[windwatch-camera] Switch failed, restoring previous camera:', err);
+      try {
+        const restored = await navigator.mediaDevices.getUserMedia(
+          buildCameraConstraints(previous, false)
+        );
+        const restoredTrack = restored.getVideoTracks()[0];
+        if (restoredTrack) {
+          attach(restoredTrack, previous);
+        } else {
+          muteLocalVideo();
+        }
+      } catch {
+        // Neither camera could be opened — reflect that honestly in the UI
+        // instead of showing a frozen last frame.
+        muteLocalVideo();
+      }
+      showWarning('Kamera değiştirilemedi.');
+    } finally {
+      setIsSwitchingCamera(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSwitchingCamera]);
 
   // Publish the call to the OS media controls (Android lock screen / notification
   // shade). Registered once for the room; the handlers are read through refs so
@@ -1846,6 +1943,10 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           onToggleDesktopAudio={setAllowDesktopAudio}
           screenCustomSettings={screenCustomSettings}
           onChangeCustomScreenSettings={applyCustomScreenSettings}
+          canSwitchCamera={hasMultipleCameras && !isVideoMuted && !isScreenSharing}
+          isSwitchingCamera={isSwitchingCamera}
+          facingMode={facingMode}
+          onSwitchCamera={switchCamera}
         />
       </div>
 

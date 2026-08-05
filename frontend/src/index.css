@@ -2534,3 +2534,17 @@ button,
 @keyframes appLoadingSpin {
   to { transform: rotate(360deg); }
 }
+
+/* Front-facing camera preview is mirrored — the universal convention, and what
+   a person expects when looking at themselves. Only our own tile is flipped;
+   remote peers receive and see the unmirrored image. */
+.video-card video.is-mirrored {
+  transform: scaleX(-1);
+}
+
+/* Camera flip control */
+.ctrl-btn.ctrl-flip.active,
+.ctrl-btn.ctrl-flip:hover:not(.is-disabled) {
+  color: var(--color-text-primary);
+  border-color: var(--border-glass-focus);
+}
