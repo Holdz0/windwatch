@@ -37,7 +37,7 @@ interface ControlsProps {
   onSwitchCamera: () => void;
 }
 
-const QUALITY_ORDER: BuiltInScreenShareQuality[] = ['detail', 'balanced', 'motion'];
+const QUALITY_ORDER: BuiltInScreenShareQuality[] = ['saver', 'detail', 'balanced', 'motion'];
 
 // How long to wait after the user stops moving a slider before actually
 // re-negotiating the share — dragging fires many change events per second,

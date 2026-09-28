@@ -18,12 +18,12 @@ import { startWakeLock, stopWakeLock } from '../utils/wakeLock';
 import { startCallMediaSession, updateCallMediaSession } from '../utils/mediaSession';
 import { isMobileDevice, buildCameraConstraints } from '../utils/device';
 import type { FacingMode } from '../utils/device';
-import { monitorCallConnection, checkCallsOnResume } from '../utils/webrtcRecovery';
-import type { RecoveryCallbacks } from '../utils/webrtcRecovery';
+import { watchCall, isCallDead, shouldInitiateCall, recallDelay } from '../utils/webrtcRecovery';
+import { getClientId } from '../utils/session';
 import {
   DEFAULT_SCREEN_QUALITY,
   DEFAULT_CUSTOM_SETTINGS,
-  MIN_SCREEN_BITRATE,
+  SCREEN_SHARE_PRESETS,
   CAMERA_ENCODING,
   buildDisplayMediaConstraints,
   applyVideoEncoding,
@@ -40,7 +40,8 @@ interface RoomProps {
   roomId: string;
   username: string;
   initialPassword: string | null;
-  onLeave: () => void;
+  /** Leaves the room; `reason` is shown on the landing page when set. */
+  onLeave: (reason?: string) => void;
 }
 
 export interface Participant {
@@ -52,6 +53,8 @@ export interface Participant {
   isAudioMuted?: boolean;
   isVideoMuted?: boolean;
   isScreenSharing?: boolean;
+  /** Their connection dropped; the server is holding their seat for a moment */
+  isReconnecting?: boolean;
   /** Mirror the local preview — the convention for a front-facing camera.
    *  Only ever set on our own tile; remote peers see us unmirrored. */
   isMirrored?: boolean;
@@ -69,11 +72,17 @@ export interface ChatMessage {
 // special characters can't break parsing; the id decouples lookups from names.
 export const FILE_MESSAGE_PREFIX = '[FILE]';
 
+// Files are held in memory and shipped as one DataChannel message — cap them so
+// a single upload can't pin both browsers.
+export const MAX_SHARE_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+
 export interface SharedFileMeta {
   id: string;
   name: string;
   size: number;
   type: string;
+  /** Sharer's PeerJS id — stable across their socket reconnects, unlike the chat sender id */
+  peerId?: string;
 }
 
 export function parseFileMessage(text: string): SharedFileMeta | null {
@@ -85,7 +94,8 @@ export function parseFileMessage(text: string): SharedFileMeta | null {
         id: meta.id,
         name: meta.name,
         size: Number(meta.size) || 0,
-        type: typeof meta.type === 'string' ? meta.type : ''
+        type: typeof meta.type === 'string' ? meta.type : '',
+        peerId: typeof meta.peerId === 'string' ? meta.peerId : undefined
       };
     }
   } catch {
@@ -95,6 +105,23 @@ export function parseFileMessage(text: string): SharedFileMeta | null {
 }
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
+
+// ICE servers for PeerJS. Google's public STUN is always included; a TURN relay
+// is appended only when configured via env vars, since it costs real bandwidth.
+function buildIceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+  ];
+  const turnUrl = import.meta.env.VITE_TURN_URL as string | undefined;
+  if (turnUrl) {
+    servers.push({
+      urls: turnUrl.split(',').map(u => u.trim()),
+      username: import.meta.env.VITE_TURN_USERNAME as string | undefined,
+      credential: import.meta.env.VITE_TURN_CREDENTIAL as string | undefined
+    });
+  }
+  return servers;
+}
 
 // Helper to parse the VITE_BACKEND_URL into host, port, and secure parameters for PeerJS
 const getPeerConfig = () => {
@@ -113,7 +140,12 @@ const getPeerConfig = () => {
       host,
       port,
       path: '/peer',
-      secure: url.protocol === 'https:'
+      secure: url.protocol === 'https:',
+      // STUN alone cannot connect users behind symmetric NATs — a TURN relay is
+      // the only fallback that guarantees a connection. Set VITE_TURN_URL /
+      // VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL to enable one (e.g. a
+      // coturn instance or a metered provider like Cloudflare/metered.ca).
+      config: buildIceServers()
     };
   } catch (err) {
     return {
@@ -195,7 +227,18 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
   // Screen share tuning: the preset drives capture constraints and encoder behaviour,
   // and the live stats let the sharer see what viewers are actually receiving.
-  const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
+  // The last quality the user picked is remembered across sessions.
+  const [screenQuality, setScreenQuality] = useState<ScreenShareQuality>(() => {
+    try {
+      const saved = localStorage.getItem('windwatch:screenQuality');
+      if (saved === 'custom' || (saved && saved in SCREEN_SHARE_PRESETS)) {
+        return saved as ScreenShareQuality;
+      }
+    } catch {
+      // storage unavailable — use the default
+    }
+    return DEFAULT_SCREEN_QUALITY;
+  });
   const [screenShareStats, setScreenShareStats] = useState<ScreenShareStats | null>(null);
 
   // Manual resolution/fps/bitrate profile for the 'custom' quality option. The
@@ -331,15 +374,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
 
   // Screen share encoder state, kept in refs so the stats loop and late-joiner
   // call setup can read the current values without re-subscribing.
-  const screenQualityRef = useRef<ScreenShareQuality>(DEFAULT_SCREEN_QUALITY);
+  const screenQualityRef = useRef<ScreenShareQuality>(screenQuality);
   useEffect(() => {
     screenQualityRef.current = screenQuality;
+    try {
+      localStorage.setItem('windwatch:screenQuality', screenQuality);
+    } catch {
+      // storage unavailable (private mode) — the preference just won't persist
+    }
   }, [screenQuality]);
 
-  // Bitrate actually in use — adapted downwards when the network can't keep up
-  const activeBitrateRef = useRef<number>(
-    resolveScreenSharePreset(DEFAULT_SCREEN_QUALITY, DEFAULT_CUSTOM_SETTINGS).maxBitrate
-  );
+  // Previous outbound byte counter, for the sharer's live kbps readout
   const prevOutboundRef = useRef<{ bytes: number; timestamp: number } | null>(null);
 
   // Mic + system audio mixer nodes on the shared AudioContext
@@ -353,17 +398,14 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // File sharing refs (keyed by generated file id, so same-named files can't collide)
   const localSharedFilesRef = useRef<Record<string, File>>({});
 
-  // Track active calls in a ref so we can close or modify them dynamically
-  // Key: socketId, Value: PeerJS Call object
-  const activeCalls = useRef<Record<string, any>>({});
-  const socketUsersRef = useRef<Set<string>>(new Set());
-  // Peer IDs of room members, used to authorize incoming file-transfer connections
-  const allowedPeerIdsRef = useRef<Set<string>>(new Set());
-  // socketId -> peerId, needed to re-establish a call from scratch when its
-  // RTCPeerConnection becomes unrecoverable (see monitorCallConnection below)
-  const socketToPeerIdRef = useRef<Map<string, string>>(new Map());
-  // True once we have successfully joined at least once (enables rejoin on reconnect)
-  const hasJoinedRef = useRef(false);
+  // Active PeerJS calls keyed by the remote PEER id. Peer ids survive socket
+  // reconnects (socket ids do not), so a signalling blip never touches media.
+  const callsRef = useRef<Map<string, any>>(new Map());
+  // Other room members (peerId -> info), straight from the server's list.
+  // Also the whitelist for incoming calls and file-transfer connections.
+  const membersRef = useRef<Map<string, { socketId: string; isReconnecting: boolean }>>(new Map());
+  // Re-sends join-room from outside the connection effect (password prompt)
+  const joinRoomRef = useRef<(() => void) | null>(null);
 
   // Refs mirroring the latest state values for asynchronous handlers
   const passwordRef = useRef<string | null>(initialPassword);
@@ -457,28 +499,26 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     socketRef.current?.emit('media-state', state);
   };
 
+  const findSender = (call: any, kind: 'audio' | 'video'): RTCRtpSender | undefined => {
+    if (!call || !call.peerConnection) return undefined;
+    return call.peerConnection
+      .getSenders()
+      .find((s: RTCRtpSender) => s.track && s.track.kind === kind);
+  };
+
   const replaceAudioSenders = (track: MediaStreamTrack) => {
-    Object.values(activeCalls.current).forEach((call: any) => {
-      const senders = call.peerConnection.getSenders();
-      const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-      if (audioSender) audioSender.replaceTrack(track);
+    callsRef.current.forEach((call: any) => {
+      findSender(call, 'audio')?.replaceTrack(track).catch(() => {});
     });
   };
 
   const replaceVideoSenders = (track: MediaStreamTrack) => {
-    Object.values(activeCalls.current).forEach((call: any) => {
-      const senders = call.peerConnection.getSenders();
-      const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-      if (videoSender) videoSender.replaceTrack(track);
+    callsRef.current.forEach((call: any) => {
+      findSender(call, 'video')?.replaceTrack(track).catch(() => {});
     });
   };
 
-  const getVideoSender = (call: any): RTCRtpSender | undefined => {
-    if (!call || !call.peerConnection) return undefined;
-    return call.peerConnection
-      .getSenders()
-      .find((s: RTCRtpSender) => s.track && s.track.kind === 'video');
-  };
+  const getVideoSender = (call: any) => findSender(call, 'video');
 
   // Applies the current screen-share encoder profile to one call.
   // A freshly created PeerJS call may not have its senders yet, so retry briefly —
@@ -493,19 +533,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     }
 
     const preset = resolveScreenSharePreset(screenQualityRef.current, screenCustomSettingsRef.current);
-    applyVideoEncoding(sender, screenEncodingFor(preset, activeBitrateRef.current));
+    applyVideoEncoding(sender, screenEncodingFor(preset));
   };
 
   const applyScreenEncodingToAllCalls = () => {
-    Object.values(activeCalls.current).forEach((call: any) => applyScreenEncodingToCall(call));
-  };
-
-  // Restores the modest camera profile on every call when a share ends
-  const restoreCameraEncoding = () => {
-    Object.values(activeCalls.current).forEach((call: any) => {
-      const sender = getVideoSender(call);
-      if (sender) applyVideoEncoding(sender, CAMERA_ENCODING);
-    });
+    callsRef.current.forEach((call: any) => applyScreenEncodingToCall(call));
   };
 
   const teardownMixer = () => {
@@ -643,7 +675,8 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       // the single biggest background battery saving on mobile.
       if (document.hidden) return;
 
-      const calls = Object.entries(activeCalls.current);
+      // Keyed by remote peer id, matching Participant.peerId
+      const calls = Array.from(callsRef.current.entries());
       if (calls.length === 0) {
         // Avoid a re-render every tick when idle
         setConnectionStats(prev => (Object.keys(prev).length ? {} : prev));
@@ -662,7 +695,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       let limitation = 'none';
       let sawOutbound = false;
 
-      for (const [socketId, call] of calls) {
+      for (const [peerId, call] of calls) {
         if (call && call.peerConnection) {
           try {
             const stats = await call.peerConnection.getStats();
@@ -675,7 +708,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                   rtt = Math.round(report.currentRoundTripTime * 1000);
                 }
               }
-              if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+              if (report.type === 'inbound-rtp' && (report.kind || report.mediaType) === 'video') {
                 const packetsLost = report.packetsLost || 0;
                 const packetsReceived = report.packetsReceived || 1;
                 packetLoss = Math.round((packetsLost / (packetsLost + packetsReceived)) * 100);
@@ -693,7 +726,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
               }
             });
 
-            statsMap[socketId] = { rtt, packetLoss };
+            statsMap[peerId] = { rtt, packetLoss };
           } catch (err) {
             // ignore stats retrieval errors
           }
@@ -736,26 +769,6 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           kbps: Math.max(0, Math.round(kbps)),
           limitation
         });
-
-        // Adaptive bitrate: back off when the network is the bottleneck, then
-        // creep back up once the encoder stops reporting a limitation. In
-        // 'custom' mode the ceiling is whatever the user manually set — this
-        // still protects against real congestion, it just never creeps above
-        // the number they chose.
-        const preset = resolveScreenSharePreset(screenQualityRef.current, screenCustomSettingsRef.current);
-        const current = activeBitrateRef.current;
-        let next = current;
-
-        if (limitation === 'bandwidth') {
-          next = Math.max(MIN_SCREEN_BITRATE, Math.round(current * 0.75));
-        } else if (limitation === 'none' && current < preset.maxBitrate) {
-          next = Math.min(preset.maxBitrate, Math.round(current * 1.15));
-        }
-
-        if (Math.abs(next - current) / current > 0.05) {
-          activeBitrateRef.current = next;
-          applyScreenEncodingToAllCalls();
-        }
       }
     }, 4000);
 
@@ -768,315 +781,338 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     let localStream: MediaStream | null = null;
     let socket: Socket | null = null;
     let peer: Peer | null = null;
-    // Declared here (not inside initConnections) so the cleanup below can
-    // remove it regardless of where in setup it ends up being assigned.
-    let visibilityHandler: (() => void) | null = null;
+    const clientId = getClientId();
 
-    const initConnections = async () => {
-      try {
-        // 1. Initialize with fake (silent/black) tracks to avoid immediate browser hardware prompts
-        const silentAudio = createSilentAudioTrack();
-        const blackVideo = createBlackVideoTrack();
-        const stream = new MediaStream([silentAudio, blackVideo]);
+    // Calls closed on purpose (leaving, replaced by a newer call, member gone)
+    // must not trigger recovery.
+    const intentionallyClosed = new WeakSet<object>();
+    // Per-peer re-dial bookkeeping
+    const recallAttempts = new Map<string, number>();
+    const recallTimers = new Map<string, number>();
+    let peerReconnectTimer: number | null = null;
+    let peerReconnectAttempts = 0;
 
-        if (isCancelled) {
-          stream.getTracks().forEach(track => stopMediaTrack(track));
+    const log = (msg: string) => console.warn(`[windwatch-webrtc] ${msg}`);
+
+    const closeCall = (peerId: string) => {
+      const call = callsRef.current.get(peerId);
+      if (call) {
+        intentionallyClosed.add(call);
+        try { call.close(); } catch { /* already closed */ }
+        callsRef.current.delete(peerId);
+      }
+      const timer = recallTimers.get(peerId);
+      if (timer !== undefined) window.clearTimeout(timer);
+      recallTimers.delete(peerId);
+    };
+
+    const closeAllCalls = () => {
+      Array.from(callsRef.current.keys()).forEach(closeCall);
+      recallAttempts.clear();
+    };
+
+    const setParticipantStream = (peerId: string, stream: MediaStream) => {
+      setParticipants(prev => prev.map(p => (p.peerId === peerId ? { ...p, stream } : p)));
+    };
+
+    // Tracks a call (incoming or outgoing) as THE call for this peer
+    const registerCall = (peerId: string, call: any) => {
+      const previous = callsRef.current.get(peerId);
+      if (previous && previous !== call) {
+        intentionallyClosed.add(previous);
+        try { previous.close(); } catch { /* already closed */ }
+      }
+      callsRef.current.set(peerId, call);
+
+      call.on('stream', (remoteStream: MediaStream) => {
+        if (isCancelled || callsRef.current.get(peerId) !== call) return;
+        setParticipantStream(peerId, remoteStream);
+      });
+
+      watchCall(call, {
+        onConnected: () => recallAttempts.delete(peerId),
+        onDead: (reason) => handleDeadCall(peerId, call, reason)
+      });
+
+      if (screenStreamRef.current) applyScreenEncodingToCall(call);
+    };
+
+    const placeCall = (peerId: string) => {
+      if (isCancelled || !peer || !peer.open || !localStream) return;
+      const call = peer.call(peerId, getActiveStream(), {
+        metadata: { callerUsername: username }
+      });
+      // PeerJS returns nothing while its signalling link is down
+      if (!call) return;
+      registerCall(peerId, call);
+    };
+
+    // Places every call this side is responsible for (see shouldInitiateCall)
+    // and that does not exist yet. Idempotent — run it whenever anything changes.
+    const reconcileCalls = () => {
+      if (isCancelled || !peer || !peer.open || !localStream) return;
+      const myPeerId = peer.id;
+      membersRef.current.forEach((member, peerId) => {
+        if (member.isReconnecting) return;
+        if (callsRef.current.has(peerId) || recallTimers.has(peerId)) return;
+        if (!shouldInitiateCall(myPeerId, peerId)) return;
+        placeCall(peerId);
+      });
+    };
+
+    function handleDeadCall(peerId: string, call: any, reason: string) {
+      if (isCancelled || intentionallyClosed.has(call)) return;
+      if (callsRef.current.get(peerId) !== call) return;
+
+      intentionallyClosed.add(call);
+      try { call.close(); } catch { /* already closed */ }
+      callsRef.current.delete(peerId);
+
+      if (!membersRef.current.has(peerId) || !peer) return;
+      if (!shouldInitiateCall(peer.id, peerId)) {
+        log(`call to ${peerId} lost (${reason}); waiting for them to call back`);
+        return;
+      }
+
+      const attempt = recallAttempts.get(peerId) ?? 0;
+      recallAttempts.set(peerId, attempt + 1);
+      const delay = recallDelay(attempt);
+      log(`call to ${peerId} lost (${reason}); re-dialling in ${delay}ms`);
+      recallTimers.set(peerId, window.setTimeout(() => {
+        recallTimers.delete(peerId);
+        reconcileCalls();
+      }, delay));
+    }
+
+    // Sends (or re-sends) our membership with the current media state. The
+    // server treats a repeat from the same clientId as a silent rejoin.
+    const joinRoom = () => {
+      if (isCancelled || !socket || !socket.connected || !peer || !peer.open) return;
+      socket.emit('join-room', {
+        roomId,
+        peerId: peer.id,
+        clientId,
+        username,
+        password: passwordRef.current,
+        media: {
+          isAudioMuted: isAudioMutedRef.current,
+          isVideoMuted: isVideoMutedRef.current,
+          isScreenSharing: !!screenStreamRef.current
+        }
+      });
+    };
+    joinRoomRef.current = joinRoom;
+
+    // Reconnects the PeerJS signalling link with exponential backoff; calling
+    // reconnect() straight from 'disconnected' spun in a tight loop while offline.
+    const schedulePeerReconnect = (immediate = false) => {
+      if (isCancelled || peerReconnectTimer !== null) return;
+      const delay = immediate ? 0 : Math.min(15000, 1000 * 2 ** peerReconnectAttempts);
+      peerReconnectAttempts++;
+      peerReconnectTimer = window.setTimeout(() => {
+        peerReconnectTimer = null;
+        if (isCancelled || !peer) return;
+        if (peer.destroyed) {
+          createPeer();
+        } else if (peer.disconnected) {
+          try { peer.reconnect(); } catch (err) { log(`PeerJS reconnect failed: ${err}`); }
+        }
+      }, delay);
+    };
+
+    function createPeer() {
+      const p = new Peer(undefined as any, getPeerConfig());
+      peer = p;
+      peerRef.current = p;
+
+      p.on('open', (id) => {
+        if (isCancelled || peer !== p) return;
+        console.log(`My PeerJS ID: ${id}`);
+        peerReconnectAttempts = 0;
+        joinRoom();
+        reconcileCalls();
+      });
+
+      p.on('disconnected', () => {
+        if (isCancelled || peer !== p) return;
+        schedulePeerReconnect();
+      });
+
+      // Destroyed (fatal error): start over with a new identity. The server
+      // announces the new peer id and the calls are rebuilt from scratch.
+      p.on('close', () => {
+        if (isCancelled || peer !== p) return;
+        log('PeerJS peer destroyed; creating a new one');
+        closeAllCalls();
+        schedulePeerReconnect();
+      });
+
+      p.on('error', (err: any) => {
+        if (isCancelled || peer !== p) return;
+        // 'peer-unavailable': the peer we dialled is gone — PeerJS closes that
+        // call, and handleDeadCall takes it from there.
+        if (err?.type !== 'peer-unavailable') log(`PeerJS error: ${err?.type || err}`);
+        if (['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected'].includes(err?.type)) {
+          schedulePeerReconnect();
+        }
+      });
+
+      // Incoming P2P file transfer requests — only served to room members
+      p.on('connection', (conn) => {
+        if (conn.label !== 'file-transfer') return;
+        if (!membersRef.current.has(conn.peer)) {
+          console.warn(`Blocked file-transfer connection from unknown peer: ${conn.peer}`);
+          conn.on('open', () => conn.close());
           return;
         }
 
+        conn.on('data', (data: any) => {
+          if (data && data.type === 'request-file' && typeof data.fileId === 'string') {
+            const file = localSharedFilesRef.current[data.fileId];
+            if (file) {
+              conn.send({ type: 'file-response', fileId: data.fileId, file });
+            } else {
+              // Tell the requester explicitly instead of leaving them waiting forever
+              conn.send({ type: 'file-error', fileId: data.fileId });
+            }
+          }
+        });
+      });
+
+      // Incoming calls. Only room members may call; the member list can arrive
+      // just after the call (join race), so retry briefly before rejecting.
+      p.on('call', (call) => {
+        if (isCancelled || peer !== p) return;
+        const tryAuthorize = (attempt: number) => {
+          if (isCancelled || peer !== p) {
+            try { call.close(); } catch { /* ignore */ }
+            return;
+          }
+          if (membersRef.current.has(call.peer) && localStream) {
+            call.answer(getActiveStream());
+            // A newer call from them replaces whatever we had (they rebuilt it)
+            const timer = recallTimers.get(call.peer);
+            if (timer !== undefined) window.clearTimeout(timer);
+            recallTimers.delete(call.peer);
+            registerCall(call.peer, call);
+          } else if (attempt < 10) {
+            window.setTimeout(() => tryAuthorize(attempt + 1), 500);
+          } else {
+            console.warn(`Blocked PeerJS call from non-member peer: ${call.peer}`);
+            call.close();
+          }
+        };
+        tryAuthorize(0);
+      });
+    }
+
+    // Tab back in the foreground: mobile OSes freeze background tabs, so the
+    // events that would have told us about dead links may never have fired.
+    const visibilityHandler = () => {
+      if (isCancelled || document.visibilityState !== 'visible') return;
+      if (socket && !socket.connected) socket.connect();
+      if (peer && (peer.disconnected || peer.destroyed)) {
+        if (peerReconnectTimer !== null) {
+          window.clearTimeout(peerReconnectTimer);
+          peerReconnectTimer = null;
+        }
+        schedulePeerReconnect(true);
+      }
+      callsRef.current.forEach((call, peerId) => {
+        if (isCallDead(call)) handleDeadCall(peerId, call, 'dead after resume');
+      });
+      reconcileCalls();
+    };
+    document.addEventListener('visibilitychange', visibilityHandler);
+
+    const initConnections = () => {
+      try {
+        // 1. Start with fake (silent/black) tracks to avoid immediate hardware prompts
+        const stream = new MediaStream([createSilentAudioTrack(), createBlackVideoTrack()]);
         localStream = stream;
         localStreamRef.current = stream;
 
-        // Temporarily render local stream locally
-        // We will add ourselves as a participant with socketId: 'local'
         setParticipants([{
           socketId: 'local',
           peerId: 'local-peer',
           username: `${username} (Siz)`,
           isHost: false,
-          stream: stream,
+          stream,
           isAudioMuted: true,
           isVideoMuted: true
         }]);
 
-        // 2. Initialize Socket.io client
+        // 2. Signalling socket. Every (re)connect re-sends join-room; the
+        // server recognises our clientId and just refreshes the socket id.
         socket = io(BACKEND_URL);
         socketRef.current = socket;
+        socket.on('connect', joinRoom);
 
-        // 3. Initialize PeerJS client using parsed configuration
-        peer = new Peer(undefined as any, getPeerConfig());
-        peerRef.current = peer;
+        // 3. PeerJS
+        createPeer();
 
-        // 4. Peer registered event
-        peer.on('open', (peerId) => {
-          if (isCancelled) return;
-          console.log(`My PeerJS ID: ${peerId}`);
-          // Join socket.io room
-          socket?.emit('join-room', { roomId, peerId, username, password: passwordRef.current });
-        });
-
-        // 4.2. Rejoin after a transient socket drop: Socket.io reconnects with a NEW
-        // socket id, so without re-emitting join-room the server considers us gone
-        // while the UI still shows the room (ghost session).
-        socket.on('connect', () => {
-          if (isCancelled) return;
-          if (hasJoinedRef.current && peer?.id) {
-            console.log('Socket reconnected, rejoining room...');
-            socket?.emit('join-room', { roomId, peerId: peer.id, username, password: passwordRef.current });
-          }
-        });
-
-        // 4.3. Recover the PeerJS signalling connection if it drops
-        peer.on('disconnected', () => {
-          if (isCancelled) return;
-          try {
-            peer?.reconnect();
-          } catch (err) {
-            console.warn('PeerJS reconnect failed:', err);
-          }
-        });
-
-        // 4.4. WebRTC connection recovery (see utils/webrtcRecovery.ts for why:
-        // mobile OSes suspend a backgrounded tab's networking, and WebRTC does
-        // not recover from that on its own). recreateCallToPeer and
-        // monitorCallConnection reference each other; safe because neither is
-        // invoked until after both are assigned below (only from async event
-        // callbacks that fire later).
-        const recoveryCallbacks: RecoveryCallbacks = {
-          recreateCall: (socketId) => recreateCallToPeer(socketId),
-          isCurrentCall: (socketId, call) => !isCancelled && activeCalls.current[socketId] === call,
-          isRoomMember: (socketId) => socketUsersRef.current.has(socketId),
-          onLog: (msg) => console.warn(`[windwatch-webrtc] ${msg}`)
-        };
-
-        const recreateCallToPeer = (socketId: string) => {
-          if (isCancelled || !peer || !localStream) return;
-          const targetPeerId = socketToPeerIdRef.current.get(socketId);
-          if (!targetPeerId) return;
-
-          const stale = activeCalls.current[socketId];
-          if (stale) {
-            try { stale.close(); } catch { /* already closed */ }
-          }
-
-          console.warn(`[windwatch-webrtc] Re-establishing call to ${socketId} (${targetPeerId})`);
-          const call = peer.call(targetPeerId, getActiveStream(), {
-            metadata: { callerSocketId: socket?.id, callerUsername: username }
-          });
-
-          call.on('stream', (remoteStream: MediaStream) => {
-            if (isCancelled) return;
-            setParticipants(prev => prev.map(p => (p.socketId === socketId ? { ...p, stream: remoteStream } : p)));
-          });
-
-          activeCalls.current[socketId] = call;
-          monitorCallConnection(socketId, call, recoveryCallbacks);
-          if (screenStreamRef.current) applyScreenEncodingToCall(call);
-        };
-
-        // 4.45. Proactive check on resume: connectionstatechange events can be
-        // delayed or coalesced while the tab's JS was frozen in the background,
-        // so re-verify every call the moment the tab becomes visible again
-        // rather than waiting on events that may arrive late (or not at all).
-        visibilityHandler = () => {
-          if (isCancelled || document.visibilityState !== 'visible') return;
-
-          if (peer?.disconnected) {
-            try { peer.reconnect(); } catch (err) { console.warn('PeerJS reconnect failed:', err); }
-          }
-
-          // Give the signalling socket a moment to come back up before poking
-          // individual calls, so a restart/recreate has somewhere to send to.
-          window.setTimeout(() => {
-            if (isCancelled) return;
-            checkCallsOnResume(activeCalls.current, recoveryCallbacks);
-          }, 1000);
-        };
-        document.addEventListener('visibilitychange', visibilityHandler);
-
-        // 4.5. Handle incoming P2P file transfer connection requests
-        peer.on('connection', (conn) => {
-          if (conn.label !== 'file-transfer') return;
-
-          // Only serve files to peers that are actually members of this room
-          if (!allowedPeerIdsRef.current.has(conn.peer)) {
-            console.warn(`Blocked file-transfer connection from unknown peer: ${conn.peer}`);
-            conn.on('open', () => conn.close());
-            return;
-          }
-
-          conn.on('data', (data: any) => {
-            if (data && data.type === 'request-file' && typeof data.fileId === 'string') {
-              const file = localSharedFilesRef.current[data.fileId];
-              if (file) {
-                // Send file directly via PeerJS data channel
-                conn.send({ type: 'file-response', fileId: data.fileId, file });
-              } else {
-                // Tell the requester explicitly instead of leaving them waiting forever
-                conn.send({ type: 'file-error', fileId: data.fileId });
-              }
-            }
-          });
-        });
-
-        // 5. Peer incoming call handler (answering calls from others)
-        peer.on('call', (call) => {
-          if (isCancelled) return;
-          console.log(`Receiving call from Peer: ${call.peer}`);
-          const callerSocketId = call.metadata?.callerSocketId;
-
-          const answerCall = () => {
-            if (isCancelled || !localStream) return;
-            call.answer(getActiveStream());
-
-            call.on('stream', (remoteStream) => {
-              if (isCancelled) return;
-              console.log(`Received remote stream on answer`);
-              // Associate stream with participant
-              setParticipants(prev => prev.map(p => {
-                if (p.peerId === call.peer || p.socketId === callerSocketId) {
-                  return { ...p, stream: remoteStream };
-                }
-                return p;
-              }));
-            });
-
-            if (callerSocketId) {
-              activeCalls.current[callerSocketId] = call;
-              monitorCallConnection(callerSocketId, call, recoveryCallbacks);
-            }
-          };
-
-          // SECURITY CHECK with retry: reject calls from Peer IDs not mapped to room members.
-          // The whitelist is filled by the room-users event, which can arrive AFTER the
-          // first incoming call (join broadcast race) — so retry briefly instead of
-          // permanently rejecting a legitimate call with no recovery path.
-          const tryAuthorize = (attempt: number) => {
-            if (isCancelled) return;
-            if (callerSocketId && socketUsersRef.current.has(callerSocketId)) {
-              answerCall();
-            } else if (attempt < 10) {
-              setTimeout(() => tryAuthorize(attempt + 1), 500);
-            } else {
-              console.warn(`Blocked unauthorized PeerJS call from socketId: ${callerSocketId}`);
-              call.close();
-            }
-          };
-          tryAuthorize(0);
-        });
-
-        // 6. Socket room users list synchronization
+        // 4. The member list is the single source of truth for who is here
         socket.on('room-users', ({ roomUsers, hostSocketId: currentHostSocketId }) => {
           if (isCancelled) return;
-          console.log('Room users updated from server:', roomUsers);
-          hasJoinedRef.current = true;
           setHostSocketId(currentHostSocketId);
           // A successful join settles any pending password prompt
           setIsPasswordPromptOpen(false);
           setPasswordError(null);
 
-          // Update active socket users / peer id whitelist caches
-          socketUsersRef.current.clear();
-          allowedPeerIdsRef.current.clear();
-          socketToPeerIdRef.current.clear();
-          roomUsers.forEach((u: any) => {
-            if (u.socketId !== socket?.id) {
-              socketUsersRef.current.add(u.socketId);
-              if (u.peerId) {
-                allowedPeerIdsRef.current.add(u.peerId);
-                socketToPeerIdRef.current.set(u.socketId, u.peerId);
-              }
-            }
+          const myPeerId = peer?.id;
+          const others = roomUsers.filter((u: any) => u.socketId !== socket?.id && u.peerId !== myPeerId);
+
+          membersRef.current = new Map(
+            others.map((u: any) => [u.peerId, { socketId: u.socketId, isReconnecting: !!u.isReconnecting }])
+          );
+
+          // Drop calls to peers that are no longer in the room (left, or
+          // reloaded with a new peer id)
+          Array.from(callsRef.current.keys()).forEach(peerId => {
+            if (!membersRef.current.has(peerId)) closeCall(peerId);
           });
 
           setParticipants(prev => {
             const localUser = prev.find(p => p.socketId === 'local');
             if (!localUser) return prev;
-
-            // Map the users list from server
             return [
               { ...localUser, isHost: currentHostSocketId === socket?.id },
-              ...roomUsers
-                .filter((u: any) => u.socketId !== socket?.id)
-                .map((u: any) => {
-                  const existing = prev.find(p => p.socketId === u.socketId);
-                  return {
-                    socketId: u.socketId,
-                    peerId: u.peerId,
-                    username: u.username,
-                    isHost: u.isHost,
-                    isScreenSharing: u.isScreenSharing,
-                    isAudioMuted: u.isAudioMuted,
-                    isVideoMuted: u.isVideoMuted,
-                    stream: existing?.stream // Preserve existing stream if available
-                  };
-                })
+              ...others.map((u: any) => {
+                const existing = prev.find(p => p.peerId === u.peerId);
+                return {
+                  socketId: u.socketId,
+                  peerId: u.peerId,
+                  username: u.username,
+                  isHost: u.isHost,
+                  isScreenSharing: u.isScreenSharing,
+                  isAudioMuted: u.isAudioMuted,
+                  isVideoMuted: u.isVideoMuted,
+                  isReconnecting: !!u.isReconnecting,
+                  // Streams belong to peer ids, so a socket reconnect keeps them
+                  stream: existing?.stream
+                };
+              })
             ];
           });
+
+          reconcileCalls();
         });
 
-        // 7. Socket user connected (an existing user calls this new user)
-        socket.on('user-connected', ({ socketId, peerId, username: newUsername, isHost: isNewUserHost, isAudioMuted: newUserAudioMuted, isVideoMuted: newUserVideoMuted }) => {
-          if (isCancelled) return;
-          console.log(`New user connected: ${newUsername} (${socketId})`);
-
-          // Whitelist new socket user + peer id
-          socketUsersRef.current.add(socketId);
-          if (peerId) {
-            allowedPeerIdsRef.current.add(peerId);
-            socketToPeerIdRef.current.set(socketId, peerId);
-          }
-
-          // Add to participant list first (as loader or just tag)
-          setParticipants(prev => {
-            if (prev.some(p => p.socketId === socketId)) return prev;
-            return [...prev, {
-              socketId,
-              peerId,
-              username: newUsername,
-              isHost: isNewUserHost,
-              isAudioMuted: newUserAudioMuted ?? true,
-              isVideoMuted: newUserVideoMuted ?? true
-            }];
-          });
-
-          // Call the newly connected user, sending our local video stream
-          if (localStream && peer) {
-            console.log(`Calling new user ${newUsername} (${peerId})`);
-            const call = peer.call(peerId, getActiveStream(), {
-              metadata: { callerSocketId: socket?.id, callerUsername: username }
-            });
-
-            call.on('stream', (remoteStream) => {
-              if (isCancelled) return;
-              console.log(`Received remote stream on call`);
-              setParticipants(prev => prev.map(p => {
-                if (p.socketId === socketId) {
-                  return { ...p, stream: remoteStream };
-                }
-                return p;
-              }));
-            });
-
-            // Store call
-            activeCalls.current[socketId] = call;
-            monitorCallConnection(socketId, call, recoveryCallbacks);
-
-            // If a screen share is already running, this new peer must get the
-            // screen-share encoder profile too — otherwise late joiners see a
-            // blurry, low-bitrate version of the share.
-            if (screenStreamRef.current) {
-              applyScreenEncodingToCall(call);
-            }
-          }
+        // 5. Someone left for good
+        socket.on('user-disconnected', ({ peerId }: { socketId: string; peerId?: string }) => {
+          if (isCancelled || !peerId) return;
+          membersRef.current.delete(peerId);
+          closeCall(peerId);
+          recallAttempts.delete(peerId);
+          setParticipants(prev => prev.filter(p => p.peerId !== peerId));
         });
 
-        // 8. Socket chat message listener
+        // 6. Chat
         socket.on('receive-message', (message: ChatMessage) => {
           if (isCancelled) return;
           setChatMessages(prev => [...prev, message]);
 
-          // Trigger notification & sound if tab is backgrounded / user is elsewhere (like during screen share)
+          // Notify when the tab is backgrounded / user is elsewhere (like during screen share)
           const isMe = message.senderId === socket?.id;
           const isSystem = message.senderId === 'system';
           if (!isMe && !isSystem && !document.hasFocus()) {
@@ -1093,13 +1129,11 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           }
         });
 
-        // 8.2. Socket message history initialization
         socket.on('room-history', (history: ChatMessage[]) => {
           if (isCancelled) return;
           setChatMessages(history);
         });
 
-        // 8.4. Socket password required query
         socket.on('password-required', () => {
           if (isCancelled) return;
           // If we actually sent a password and were still rejected, it was wrong
@@ -1109,74 +1143,47 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           setIsPasswordPromptOpen(true);
         });
 
-        // 8.6. Socket room lock state listener
         socket.on('room-locked-status', ({ isLocked }: { isLocked: boolean }) => {
           if (isCancelled) return;
           setIsRoomLocked(isLocked);
         });
 
-        // 8.8. Socket kicked event
         socket.on('kicked', (msg: string) => {
           if (isCancelled) return;
-          alert(msg);
-          onLeaveRef.current();
+          onLeaveRef.current(msg);
         });
 
-        // 8.9. Remote mute request listener (Host muting us)
+        socket.on('session-replaced', () => {
+          if (isCancelled) return;
+          onLeaveRef.current('Bu oda başka bir sekmede açıldı; bu sekmedeki bağlantı kapatıldı.');
+        });
+
+        // Remote mute request (host muting us)
         socket.on('mute-user-request', ({ trackKind }: { trackKind: 'audio' | 'video' }) => {
           if (isCancelled) return;
           if (trackKind === 'audio') {
-            if (!isAudioMutedRef.current) {
-              muteLocalAudio();
-            }
+            if (!isAudioMutedRef.current) muteLocalAudio();
             showWarning('Oda kurucusu mikrofonunuzu kapattı.');
           } else if (trackKind === 'video') {
-            if (!isVideoMutedRef.current) {
-              muteLocalVideo();
-            }
+            if (!isVideoMutedRef.current) muteLocalVideo();
             showWarning('Oda kurucusu kameranızı kapattı.');
           }
         });
 
-        // 9. Socket user disconnected cleanup
-        socket.on('user-disconnected', ({ socketId }) => {
+        // Fatal errors: leave the room. Non-fatal issues arrive on 'warning-msg'.
+        socket.on('error-msg', (msg: string) => {
           if (isCancelled) return;
-          console.log(`Participant left room: ${socketId}`);
-
-          // Remove from whitelists
-          socketUsersRef.current.delete(socketId);
-          socketToPeerIdRef.current.delete(socketId);
-          setParticipants(prev => {
-            const leaving = prev.find(p => p.socketId === socketId);
-            if (leaving?.peerId) allowedPeerIdsRef.current.delete(leaving.peerId);
-            return prev.filter(p => p.socketId !== socketId);
-          });
-
-          // Close WebRTC call
-          if (activeCalls.current[socketId]) {
-            activeCalls.current[socketId].close();
-            delete activeCalls.current[socketId];
-          }
+          onLeaveRef.current(msg);
         });
 
-        // 10. Fatal errors: leave the room. Non-fatal issues arrive on 'warning-msg'.
-        socket.on('error-msg', (msg) => {
-          if (isCancelled) return;
-          alert(`Hata: ${msg}`);
-          onLeaveRef.current();
-        });
-
-        // 10.5. Non-fatal warnings (rate limits etc.) — show a toast, stay in the room
         socket.on('warning-msg', (msg: string) => {
           if (isCancelled) return;
           showWarning(msg);
         });
-
       } catch (err) {
         if (isCancelled) return;
         console.error('Media stream or connection initialization failed:', err);
-        alert('Bağlantı kurulamadı. Lütfen tekrar deneyin.');
-        onLeaveRef.current();
+        onLeaveRef.current('Bağlantı kurulamadı. Lütfen tekrar deneyin.');
       }
     };
 
@@ -1186,41 +1193,30 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     return () => {
       isCancelled = true;
       console.log('Cleaning up room connections...');
+      joinRoomRef.current = null;
 
-      if (visibilityHandler) {
-        document.removeEventListener('visibilitychange', visibilityHandler);
-      }
+      document.removeEventListener('visibilitychange', visibilityHandler);
+      if (peerReconnectTimer !== null) window.clearTimeout(peerReconnectTimer);
 
-      // Stop all tracks in camera stream
       if (localStream) {
-        (localStream as MediaStream).getTracks().forEach(track => stopMediaTrack(track));
+        localStream.getTracks().forEach(track => stopMediaTrack(track));
       }
 
-      // Stop all tracks in screen stream
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach(track => track.stop());
         screenStreamRef.current = null;
       }
 
-      // Tear down the audio mixer nodes
       teardownMixer();
 
       // Clear playback-unlock state so it doesn't leak into the next room
       resetAudioUnlock();
 
-      // Close all PeerJS calls
-      Object.values(activeCalls.current).forEach((call: any) => call.close());
-      activeCalls.current = {};
+      closeAllCalls();
+      membersRef.current = new Map();
 
-      // Disconnect socket
-      if (socket) {
-        (socket as Socket).disconnect();
-      }
-
-      // Destroy peerJS
-      if (peer) {
-        (peer as Peer).destroy();
-      }
+      if (socket) socket.disconnect();
+      if (peer) peer.destroy();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, username]);
@@ -1269,7 +1265,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         emitMediaState({ isAudioMuted: false });
       } catch (err) {
         console.error('Mikrofon erişimi alınamadı:', err);
-        alert('Mikrofon erişim izni verilmedi.');
+        showWarning('Mikrofon erişim izni verilmedi.');
       }
     } else {
       // Turn off microphone: stop hardware track to release recording indicator
@@ -1309,7 +1305,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         emitMediaState({ isVideoMuted: false });
       } catch (err) {
         console.error('Kamera erişimi alınamadı:', err);
-        alert('Kamera erişim izni verilmedi.');
+        showWarning('Kamera erişim izni verilmedi.');
       }
     } else {
       // Turn off camera: stop hardware track to release green light
@@ -1380,16 +1376,19 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // Publish the call to the OS media controls (Android lock screen / notification
   // shade). Registered once for the room; the handlers are read through refs so
   // they always invoke the current toggles without re-registering.
-  const mediaSessionHandlersRef = useRef({ toggleAudio, toggleVideo, onLeave });
+  const mediaSessionHandlersRef = useRef({ toggleAudio, toggleVideo });
   useEffect(() => {
-    mediaSessionHandlersRef.current = { toggleAudio, toggleVideo, onLeave };
+    mediaSessionHandlersRef.current = { toggleAudio, toggleVideo };
   });
 
   useEffect(() => {
     return startCallMediaSession({
       onToggleMicrophone: () => mediaSessionHandlersRef.current.toggleAudio(),
       onToggleCamera: () => mediaSessionHandlersRef.current.toggleVideo(),
-      onHangUp: () => mediaSessionHandlersRef.current.onLeave()
+      onHangUp: () => {
+        socketRef.current?.emit('leave-room');
+        onLeaveRef.current();
+      }
     });
   }, []);
 
@@ -1478,7 +1477,6 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     }
 
     screenStreamRef.current = stream;
-    activeBitrateRef.current = preset.maxBitrate;
     prevOutboundRef.current = null;
 
     if ('contentHint' in videoTrack) {
@@ -1496,20 +1494,23 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
       );
     }
 
-    // Swap tracks + encoder profile on every active call
+    // Swap tracks + encoder profile on every active call. The encoder profile
+    // goes first so the very first screen frame is already encoded with the
+    // share's bitrate ceiling and degradation preference, not the camera's.
     await Promise.all(
-      Object.values(activeCalls.current).map(async (call: any) => {
-        const senders = call.peerConnection.getSenders();
-
-        const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-        if (videoSender) {
-          await videoSender.replaceTrack(videoTrack);
-          await applyVideoEncoding(videoSender, screenEncodingFor(preset, preset.maxBitrate));
-        }
-
-        if (outgoingAudio) {
-          const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-          if (audioSender) await audioSender.replaceTrack(outgoingAudio);
+      Array.from(callsRef.current.values()).map(async (call: any) => {
+        try {
+          const videoSender = findSender(call, 'video');
+          if (videoSender) {
+            await applyVideoEncoding(videoSender, screenEncodingFor(preset));
+            await videoSender.replaceTrack(videoTrack);
+          }
+          if (outgoingAudio) {
+            await findSender(call, 'audio')?.replaceTrack(outgoingAudio);
+          }
+        } catch (err) {
+          // One broken call must not abort the share for everyone else
+          console.warn('Failed to switch a call to the screen share:', err);
         }
       })
     );
@@ -1542,7 +1543,6 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     screenQualityRef.current = quality;
 
     const preset = resolveScreenSharePreset(quality, screenCustomSettingsRef.current);
-    activeBitrateRef.current = preset.maxBitrate;
 
     const stream = screenStreamRef.current;
     if (!stream) return; // Not sharing yet — the preset applies at capture time
@@ -1593,30 +1593,21 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     setScreenShareStats(null);
     prevOutboundRef.current = null;
 
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-
-      // Revert tracks in all active calls
-      Object.values(activeCalls.current).forEach(async (call: any) => {
-        const senders = call.peerConnection.getSenders();
-
-        // Revert video track to camera
-        const videoSender = senders.find((s: any) => s.track && s.track.kind === 'video');
-        if (videoSender && videoTrack) {
-          await videoSender.replaceTrack(videoTrack);
+    // Revert every call to the camera (or its black placeholder) + microphone
+    const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+    const audioTrack = localStreamRef.current?.getAudioTracks()[0];
+    callsRef.current.forEach(async (call: any) => {
+      try {
+        const videoSender = findSender(call, 'video');
+        if (videoSender) {
+          if (videoTrack) await videoSender.replaceTrack(videoTrack);
           await applyVideoEncoding(videoSender, CAMERA_ENCODING);
         }
-
-        // Revert audio track to microphone
-        const audioSender = senders.find((s: any) => s.track && s.track.kind === 'audio');
-        if (audioSender && audioTrack) {
-          await audioSender.replaceTrack(audioTrack);
-        }
-      });
-    } else {
-      restoreCameraEncoding();
-    }
+        if (audioTrack) await findSender(call, 'audio')?.replaceTrack(audioTrack);
+      } catch (err) {
+        console.warn('Failed to revert a call to the camera:', err);
+      }
+    });
 
     setIsScreenSharing(false);
     updateLocalParticipant({
@@ -1673,7 +1664,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
         console.error('Failed to detach chat window:', err);
       }
     } else {
-      alert('Tarayıcınız Document Picture-in-Picture API desteğine sahip değil. Lütfen güncel Chrome veya Edge kullanın.');
+      showWarning('Tarayıcınız sohbeti ayrı pencereye almayı desteklemiyor. Lütfen güncel Chrome veya Edge kullanın.');
     }
   };
 
@@ -1686,9 +1677,22 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   }, [roomId]);
 
   const handleShareFile = useCallback((file: File) => {
+    // The whole file is held in memory and sent over one DataChannel message
+    // (see handleDownloadFile) — a hard cap keeps a huge upload from pinning
+    // both browsers until the tab crashes.
+    if (file.size > MAX_SHARE_FILE_SIZE) {
+      showWarning(`Dosya çok büyük. En fazla ${MAX_SHARE_FILE_SIZE / (1024 * 1024)} MB paylaşılabilir.`);
+      return;
+    }
     const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     localSharedFilesRef.current[fileId] = file;
-    const meta: SharedFileMeta = { id: fileId, name: file.name, size: file.size, type: file.type };
+    const meta: SharedFileMeta = {
+      id: fileId,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      peerId: peerRef.current?.id
+    };
     // Broadcast file offer metadata in chat channel
     handleSendMessage(`${FILE_MESSAGE_PREFIX}${JSON.stringify(meta)}`);
   }, [handleSendMessage]);
@@ -1698,13 +1702,17 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
   // or when the sender no longer has the file.
   const handleDownloadFile = (senderSocketId: string, fileMeta: SharedFileMeta): Promise<void> => {
     return new Promise((resolve, reject) => {
-      const participant = participants.find(p => p.socketId === senderSocketId);
-      if (!participant || !peerRef.current) {
+      // Prefer the peer id carried in the offer: the chat sender id is a socket
+      // id, which changes whenever the sharer's connection is re-established.
+      const senderPeerId = fileMeta.peerId && participants.some(p => p.peerId === fileMeta.peerId)
+        ? fileMeta.peerId
+        : participants.find(p => p.socketId === senderSocketId)?.peerId;
+      if (!senderPeerId || !peerRef.current) {
         reject(new Error('Kullanıcı odada bulunamadı veya P2P bağlantısı kurulamıyor.'));
         return;
       }
 
-      const conn = peerRef.current.connect(participant.peerId, { label: 'file-transfer' });
+      const conn = peerRef.current.connect(senderPeerId, { label: 'file-transfer' });
 
       let settled = false;
       const finish = (err?: Error) => {
@@ -1770,17 +1778,20 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
     e.preventDefault();
     if (!passwordInput.trim()) return;
     setPassword(passwordInput);
+    passwordRef.current = passwordInput;
     setPasswordError(null);
     setIsPasswordPromptOpen(false);
 
-    // Retry join-room
-    socketRef.current?.emit('join-room', {
-      roomId,
-      peerId: peerRef.current?.id,
-      username,
-      password: passwordInput
-    });
+    // Retry join-room with the new password
+    joinRoomRef.current?.();
   };
+
+  // The Leave button: tell the server this is deliberate, so our seat is freed
+  // right away instead of being held for a reconnect.
+  const leaveRoom = useCallback(() => {
+    socketRef.current?.emit('leave-room');
+    onLeaveRef.current();
+  }, []);
 
   const hasActiveScreenShare = participants.some(p => p.isScreenSharing);
   const showMobileScreenShareChat = isMobile && hasActiveScreenShare && isChatOpen && !pipWindow;
@@ -1856,7 +1867,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
                 required
               />
               <div className="password-prompt-buttons">
-                <button type="button" className="btn btn-secondary" onClick={onLeave}>Geri Dön</button>
+                <button type="button" className="btn btn-secondary" onClick={leaveRoom}>Geri Dön</button>
                 <button type="submit" className="btn btn-primary">Giriş Yap</button>
               </div>
             </form>
@@ -1935,7 +1946,7 @@ const Room: React.FC<RoomProps> = ({ roomId, username, initialPassword, onLeave 
           toggleVideo={toggleVideo}
           toggleScreenShare={toggleScreenShare}
           toggleChat={toggleChat}
-          onLeave={onLeave}
+          onLeave={leaveRoom}
           screenQuality={screenQuality}
           onChangeScreenQuality={changeScreenQuality}
           screenShareBlockedBy={remoteSharer?.username}

@@ -1,18 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { Video, ArrowRight, Loader, User, Link as LinkIcon, Plus, LogIn, Lock } from 'lucide-react';
+import { loadSavedUsername } from '../utils/session';
 
 interface HomeProps {
   onJoinRoom: (roomId: string, username: string, password?: string) => void;
   initialRoomId: string | null;
+  /** Why the user was returned here (kicked, room closed, ...) */
+  notice?: string | null;
 }
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
-const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId }) => {
-  const [username, setUsername] = useState('');
+const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
+  const [username, setUsername] = useState(loadSavedUsername);
   const [roomIdInput, setRoomIdInput] = useState(initialRoomId || '');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(notice ?? null);
+
+  useEffect(() => {
+    if (notice) setError(notice);
+  }, [notice]);
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(initialRoomId ? 'join' : 'create');
   const [usePassword, setUsePassword] = useState(false);
   const [roomPassword, setRoomPassword] = useState('');

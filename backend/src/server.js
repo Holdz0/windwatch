@@ -38,9 +38,11 @@ const corsOptions = {
     const cleanOrigin = origin.trim().replace(/\/$/, '');
     const cleanAllowedOrigins = allowedOrigins.map(o => o.trim().replace(/\/$/, ''));
     
-    const isAllowedProduction = process.env.FRONTEND_URL 
+    // Without FRONTEND_URL this would otherwise fall open — allowing every
+    // production origin — so an unset variable must fail closed instead.
+    const isAllowedProduction = process.env.FRONTEND_URL
       ? cleanAllowedOrigins.includes(cleanOrigin)
-      : true;
+      : false;
 
     if (isLocal || isAllowedProduction) {
       callback(null, true);

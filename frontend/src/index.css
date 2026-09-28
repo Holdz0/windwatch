@@ -715,6 +715,13 @@ body {
   align-items: center;
 }
 
+/* Participant whose connection dropped; the server holds their seat briefly */
+.status-badge.reconnecting-badge {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+}
+
 /* Screen Share split layouts */
 .screen-share-layout {
   display: flex;

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import Home from './components/Home';
+import { loadSession, saveSession, clearSession } from './utils/session';
 
 // Room pulls in peerjs + socket.io-client, which together dominate the bundle
 // and are useless until someone actually joins a room. Loading it lazily keeps
@@ -20,40 +21,48 @@ function parseRoomIdFromPath(): string | null {
   return null;
 }
 
+// A reload of /room/<id> in a tab that was in that room rejoins directly
+function restoredUsername(): string | null {
+  const session = loadSession();
+  const roomId = parseRoomIdFromPath();
+  return session && roomId && session.roomId === roomId ? session.username : null;
+}
+
 function App() {
-  const [roomId, setRoomId] = useState<string | null>(null);
-  const [username, setUsername] = useState<string | null>(null);
+  const [roomId, setRoomId] = useState<string | null>(parseRoomIdFromPath);
+  const [username, setUsername] = useState<string | null>(restoredUsername);
   const [roomPassword, setRoomPassword] = useState<string | null>(null);
+  // Why we were sent back to the landing page (kicked, room gone, ...)
+  const [leaveReason, setLeaveReason] = useState<string | null>(null);
 
-  // Parse room ID from the URL on load
+  // Browser back/forward
   useEffect(() => {
-    setRoomId(parseRoomIdFromPath());
-
-    // Popstate event to handle browser back/forward buttons
     const handlePopState = () => {
       setRoomId(parseRoomIdFromPath());
+      setUsername(restoredUsername());
     };
-
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   // Memoized so a re-render of App doesn't hand Room a new callback identity
   const handleJoinRoom = useCallback((selectedRoomId: string, enteredUsername: string, enteredPassword?: string) => {
+    setLeaveReason(null);
     setUsername(enteredUsername);
     setRoomId(selectedRoomId);
-    if (enteredPassword) {
-      setRoomPassword(enteredPassword);
-    }
+    setRoomPassword(enteredPassword || null);
+    saveSession({ roomId: selectedRoomId, username: enteredUsername });
 
     // Update the browser URL without reloading the page
     window.history.pushState({}, '', `/room/${encodeURIComponent(selectedRoomId)}`);
   }, []);
 
-  const handleLeaveRoom = useCallback(() => {
+  const handleLeaveRoom = useCallback((reason?: string) => {
+    clearSession();
     setRoomId(null);
     setUsername(null);
     setRoomPassword(null);
+    setLeaveReason(reason || null);
 
     // Reset URL to root
     window.history.pushState({}, '', '/');
@@ -65,6 +74,7 @@ function App() {
         <Home
           onJoinRoom={handleJoinRoom}
           initialRoomId={roomId}
+          notice={leaveReason}
         />
       ) : (
         <Suspense fallback={<div className="app-loading"><span className="app-loading-spinner" /></div>}>

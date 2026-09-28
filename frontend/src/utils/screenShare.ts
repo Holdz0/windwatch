@@ -6,7 +6,7 @@
 // these levers — contentHint, degradationPreference, maxFramerate and maxBitrate —
 // so each preset drives all of them consistently.
 
-export type BuiltInScreenShareQuality = 'detail' | 'balanced' | 'motion';
+export type BuiltInScreenShareQuality = 'saver' | 'detail' | 'balanced' | 'motion';
 /** 'custom' resolves through resolveScreenSharePreset() using the user's own numbers. */
 export type ScreenShareQuality = BuiltInScreenShareQuality | 'custom';
 
@@ -24,6 +24,17 @@ export interface ScreenSharePreset {
 }
 
 export const SCREEN_SHARE_PRESETS: Record<BuiltInScreenShareQuality, ScreenSharePreset> = {
+  saver: {
+    id: 'saver',
+    label: 'Tasarruf',
+    hint: 'Zayıf internet için: düşük kare hızı, en az veri harcaması.',
+    contentHint: 'detail',
+    maxWidth: 1280,
+    maxHeight: 720,
+    frameRate: 10,
+    maxBitrate: 700_000,
+    degradationPreference: 'maintain-resolution'
+  },
   detail: {
     id: 'detail',
     label: 'Metin & Kod',
@@ -61,12 +72,9 @@ export const SCREEN_SHARE_PRESETS: Record<BuiltInScreenShareQuality, ScreenShare
 
 export const DEFAULT_SCREEN_QUALITY: ScreenShareQuality = 'balanced';
 
-/** Adaptive bitrate never drops below this — under it the share is unreadable anyway. */
-export const MIN_SCREEN_BITRATE = 500_000;
-
 // --- Custom (manual) profile -----------------------------------------------
 //
-// The three presets above cover the common cases; power users on a strong
+// The built-in presets above cover the common cases; power users on a strong
 // connection (or a deliberately poor one) may want to pick exact numbers
 // instead. 'custom' resolves to a preset built from these numbers rather than
 // a fixed table entry — everything downstream (capture constraints, encoder
@@ -100,9 +108,8 @@ export const CUSTOM_RESOLUTION_OPTIONS: { label: string; height: number }[] = [
 export const CUSTOM_FRAMERATE_OPTIONS: number[] = [5, 10, 15, 24, 30, 45, 60];
 
 // Bitrate is a genuine continuum (unlike resolution/fps, there's no natural set
-// of "correct" stops), so it's the one true slider — floor kept below
-// MIN_SCREEN_BITRATE to let someone on a very poor link go lower than the
-// adaptive algorithm's own backoff floor if they choose to.
+// of "correct" stops), so it's the one true slider. It is a ceiling: WebRTC's
+// own congestion control sends less whenever the link can't carry it.
 export const CUSTOM_BITRATE_BOUNDS = { min: 200_000, max: 15_000_000, step: 100_000 };
 
 /** 16:9 width for a given height, rounded to an even number (codecs prefer even dimensions). */
@@ -259,10 +266,14 @@ export async function applyVideoEncoding(
   }
 }
 
-/** Encoder options for an active screen share at a given (possibly adapted) bitrate. */
-export function screenEncodingFor(preset: ScreenSharePreset, bitrate: number): VideoEncodingOptions {
+/**
+ * Encoder options for an active screen share. maxBitrate is only a ceiling:
+ * WebRTC's congestion control already sends less when the link can't carry it,
+ * so lowering the ceiling ourselves just stops it from ramping back up.
+ */
+export function screenEncodingFor(preset: ScreenSharePreset): VideoEncodingOptions {
   return {
-    maxBitrate: bitrate,
+    maxBitrate: preset.maxBitrate,
     maxFramerate: preset.frameRate,
     degradationPreference: preset.degradationPreference,
     priority: 'high',

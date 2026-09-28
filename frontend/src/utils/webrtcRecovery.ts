@@ -1,143 +1,89 @@
-// WebRTC connection recovery.
+// WebRTC call health + recovery rules.
 //
-// Mobile OSes suspend a backgrounded tab's networking (switching apps, screen
-// off) to save battery — that is a browser/OS policy no web page can opt out
-// of. But WebRTC also does NOT recover on its own once networking resumes: an
-// RTCPeerConnection left in 'disconnected'/'failed' needs an explicit ICE
-// restart, and one the browser fully closed needs the call re-established
-// from scratch. Left unhandled, backgrounding the tab during a call silently
-// and permanently drops that participant's audio/video.
+// Mobile OSes suspend a backgrounded tab's networking and networks drop, so a
+// call's RTCPeerConnection can die at any time. PeerJS cannot renegotiate an
+// existing call (it ignores `negotiationneeded`, so restartIce() is a no-op)
+// and on ICE 'failed' it closes the connection itself — the only reliable way
+// back is to notice the death and place a brand-new call.
 //
-// Factored out of Room.tsx so the recovery state machine can be unit tested
-// without a real RTCPeerConnection or browser.
+// If both sides did that they would dial each other at the same moment and
+// tear down each other's call (glare). So exactly one side of every pair is
+// responsible for placing calls: the one with the smaller peer id. The same
+// rule is used for the first call, so it never matters who joined first or
+// which socket events were missed during a reconnect.
 
-export interface RecoverablePeerConnection {
-  connectionState: string;
-  addEventListener(type: 'connectionstatechange', cb: () => void): void;
-  restartIce?: () => void;
+/** 'disconnected' is often a brief blip; wait this long before calling it dead. */
+export const DISCONNECTED_GRACE_MS = 8000;
+/** Delays between re-dial attempts; the last value repeats while the peer stays in the room. */
+export const RECALL_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
+
+export function recallDelay(attempt: number): number {
+  return RECALL_BACKOFF_MS[Math.min(attempt, RECALL_BACKOFF_MS.length - 1)];
 }
 
-export interface RecoverableCall {
-  peerConnection: RecoverablePeerConnection | null | undefined;
+/** Whether this side places (and re-places) the call between the two peers. */
+export function shouldInitiateCall(myPeerId: string, theirPeerId: string): boolean {
+  return myPeerId < theirPeerId;
 }
 
-export interface RecoveryCallbacks {
-  /** Re-establishes the call to this socket from scratch (fresh offer/answer). */
-  recreateCall: (socketId: string) => void;
-  /** False once `call` has been superseded by a newer call for the same socketId. */
-  isCurrentCall: (socketId: string, call: RecoverableCall) => boolean;
-  /** False once the peer has actually left the room — don't resurrect calls to ghosts. */
-  isRoomMember: (socketId: string) => boolean;
-  onLog?: (msg: string) => void;
+export interface WatchableCall {
+  peerConnection: RTCPeerConnection | null | undefined;
+  on(event: 'close' | 'error', cb: (...args: any[]) => void): unknown;
 }
 
-// Minimal subset of the timer API needed, injectable so tests can run without
-// real delays.
-export interface TimerLike {
-  setTimeout: (fn: () => void, ms: number) => unknown;
+export interface CallWatchHandlers {
+  /** Fired at most once, when the call can no longer carry media. */
+  onDead: (reason: string) => void;
+  /** Fired whenever ICE reaches a connected state. */
+  onConnected: () => void;
 }
 
-const defaultTimers: TimerLike = { setTimeout: (fn, ms) => setTimeout(fn, ms) };
+/** True when a call's connection is gone for good (used on tab resume). */
+export function isCallDead(call: WatchableCall): boolean {
+  const pc = call.peerConnection;
+  if (!pc) return true;
+  return pc.signalingState === 'closed' ||
+    pc.iceConnectionState === 'failed' ||
+    pc.iceConnectionState === 'closed';
+}
 
-/** 'disconnected' is often a brief blip; wait this long before acting on it. */
-export const DISCONNECTED_GRACE_MS = 4000;
-/** Minimum time between restartIce() attempts on the same call. */
-export const RESTART_COOLDOWN_MS = 6000;
-/** After this many failed restarts, stop retrying ICE and rebuild the call instead. */
-export const MAX_RESTART_ATTEMPTS_BEFORE_RECREATE = 2;
+/** Watches one call and reports when it dies. */
+export function watchCall(call: WatchableCall, handlers: CallWatchHandlers): void {
+  let dead = false;
+  let disconnectTimer: number | null = null;
 
-/**
- * Attaches recovery behaviour to one call's RTCPeerConnection:
- *  - 'failed' immediately attempts an ICE restart, escalating to a full
- *    recreate after repeated failures (or immediately if restartIce() isn't
- *    supported by this browser).
- *  - 'disconnected' waits out a grace period (it usually self-heals) before
- *    doing anything.
- *  - 'closed' unexpectedly (not via our own intentional cleanup) rebuilds the
- *    call, but only if the peer is still actually in the room.
- *  - 'connected' resets the attempt counter, so a later hiccup gets a full
- *    retry budget rather than an accumulated one.
- */
-export function monitorCallConnection(
-  socketId: string,
-  call: RecoverableCall,
-  cb: RecoveryCallbacks,
-  timers: TimerLike = defaultTimers
-): void {
+  const clearTimer = () => {
+    if (disconnectTimer !== null) {
+      window.clearTimeout(disconnectTimer);
+      disconnectTimer = null;
+    }
+  };
+
+  const die = (reason: string) => {
+    if (dead) return;
+    dead = true;
+    clearTimer();
+    handlers.onDead(reason);
+  };
+
+  call.on('close', () => die('closed'));
+  call.on('error', (err: any) => die(`error: ${err?.type || err}`));
+
   const pc = call.peerConnection;
   if (!pc) return;
 
-  let recovering = false;
-  let attempts = 0;
-
-  const tryRestartIce = () => {
-    if (recovering) return;
-    recovering = true;
-    attempts++;
-    cb.onLog?.(`${socketId}: connection ${pc.connectionState}, attempting ICE restart (try ${attempts})`);
-    try {
-      if (typeof pc.restartIce === 'function') {
-        pc.restartIce();
-      } else {
-        throw new Error('restartIce unsupported by this browser');
-      }
-    } catch (err) {
-      cb.onLog?.(`ICE restart unavailable, re-establishing call instead: ${err}`);
-      cb.recreateCall(socketId);
-    }
-    timers.setTimeout(() => { recovering = false; }, RESTART_COOLDOWN_MS);
-  };
-
-  const onStateChange = () => {
-    // Superseded by a newer call for the same peer — stop reacting on this one
-    if (!cb.isCurrentCall(socketId, call)) return;
-
-    const state = pc.connectionState;
-    if (state === 'connected') {
-      attempts = 0;
+  pc.addEventListener('iceconnectionstatechange', () => {
+    const state = pc.iceConnectionState;
+    if (state === 'connected' || state === 'completed') {
+      clearTimer();
+      handlers.onConnected();
     } else if (state === 'failed') {
-      if (attempts >= MAX_RESTART_ATTEMPTS_BEFORE_RECREATE) {
-        cb.recreateCall(socketId);
-      } else {
-        tryRestartIce();
-      }
-    } else if (state === 'disconnected') {
-      timers.setTimeout(() => {
-        if (cb.isCurrentCall(socketId, call) && pc.connectionState === 'disconnected') {
-          tryRestartIce();
-        }
+      die('ice failed');
+    } else if (state === 'disconnected' && disconnectTimer === null) {
+      disconnectTimer = window.setTimeout(() => {
+        disconnectTimer = null;
+        if (pc.iceConnectionState === 'disconnected') die('ice disconnected');
       }, DISCONNECTED_GRACE_MS);
-    } else if (state === 'closed') {
-      if (cb.isRoomMember(socketId)) {
-        cb.recreateCall(socketId);
-      }
-    }
-  };
-
-  pc.addEventListener('connectionstatechange', onStateChange);
-}
-
-/**
- * Proactive check run when the tab becomes visible again. `connectionstatechange`
- * events can be delayed or coalesced while the tab's JS was frozen in the
- * background, so every active call is re-checked directly rather than waiting
- * on events that may arrive late or not at all.
- */
-export function checkCallsOnResume(
-  activeCalls: Record<string, RecoverableCall>,
-  cb: RecoveryCallbacks
-): void {
-  Object.entries(activeCalls).forEach(([socketId, call]) => {
-    const pc = call.peerConnection;
-    if (!pc) return;
-
-    if (pc.connectionState === 'closed') {
-      if (cb.isRoomMember(socketId)) cb.recreateCall(socketId);
-    } else if (pc.connectionState !== 'connected' && pc.connectionState !== 'connecting') {
-      if (typeof pc.restartIce === 'function') {
-        cb.onLog?.(`Tab resumed; nudging ${socketId} (${pc.connectionState})`);
-        pc.restartIce();
-      }
     }
   });
 }
