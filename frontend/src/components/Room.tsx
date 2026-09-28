@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import io, { Socket } from 'socket.io-client';
-import { Peer } from 'peerjs';
+import { Peer, util as peerUtil } from 'peerjs';
 import { Copy, Users, Lock, Unlock, KeyRound } from 'lucide-react';
 import VideoGrid from './VideoGrid';
 import Chat from './Chat';
@@ -106,11 +106,15 @@ export function parseFileMessage(text: string): SharedFileMeta | null {
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
-// ICE servers for PeerJS. Google's public STUN is always included; a TURN relay
-// is appended only when configured via env vars, since it costs real bandwidth.
+// ICE servers for PeerJS. Starts from PeerJS's own defaults — Google STUN plus
+// PeerJS's public TURN relay. That relay is what connects peers behind NATs
+// STUN cannot traverse (mobile data, carrier-grade NAT); dropping it leaves
+// those calls with chat but no audio/video. A dedicated TURN relay configured
+// via env vars is added on top, since the public one is best-effort.
 function buildIceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    ...(peerUtil.defaultConfig.iceServers ?? []),
+    { urls: 'stun:stun1.l.google.com:19302' }
   ];
   const turnUrl = import.meta.env.VITE_TURN_URL as string | undefined;
   if (turnUrl) {
