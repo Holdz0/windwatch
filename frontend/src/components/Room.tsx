@@ -145,7 +145,10 @@ const getPeerConfig = () => {
       // the only fallback that guarantees a connection. Set VITE_TURN_URL /
       // VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL to enable one (e.g. a
       // coturn instance or a metered provider like Cloudflare/metered.ca).
-      config: buildIceServers()
+      // PeerJS hands `config` straight to `new RTCPeerConnection()`, so it must
+      // be an RTCConfiguration — a bare server array is silently ignored and
+      // leaves the call with no STUN at all.
+      config: { iceServers: buildIceServers() }
     };
   } catch (err) {
     return {
