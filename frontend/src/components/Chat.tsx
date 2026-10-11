@@ -2,12 +2,19 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Send, X, Paperclip, FileText, Download, Check, ExternalLink } from 'lucide-react';
 import type { ChatMessage, SharedFileMeta } from '../types';
 import { parseFileMessage } from '../types';
+import { FILE_RATE_OPTIONS } from '../utils/files';
+import type { TransferProgress } from '../utils/files';
+import FileTransferStatus from './FileTransferStatus';
 
 interface ChatProps {
   messages: ChatMessage[];
   onSendMessage: (text: string) => boolean;
   onShareFile: (file: File) => void;
   onDownloadFile: (senderSocketId: string, file: SharedFileMeta) => Promise<void>;
+  transfers: TransferProgress[];
+  onCancelTransfer: (id: string) => void;
+  fileRate: number;
+  onChangeFileRate: (rate: number) => void;
   myId: string;
   onClose: () => void;
   onDetach?: () => void;
@@ -26,6 +33,10 @@ const Chat: React.FC<ChatProps> = ({
   onSendMessage, 
   onShareFile, 
   onDownloadFile, 
+  transfers,
+  onCancelTransfer,
+  fileRate,
+  onChangeFileRate,
   myId, 
   onClose,
   onDetach,
@@ -101,7 +112,7 @@ const Chat: React.FC<ChatProps> = ({
   };
 
   // Track downloading states: fileId -> boolean
-  const [downloadingFiles, setDownloadingFiles] = useState<Record<string, boolean>>({});
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
 
   // Auto-scroll to bottom of chat when new message arrives
   useEffect(() => {
@@ -155,14 +166,11 @@ const Chat: React.FC<ChatProps> = ({
   // Trigger P2P file transfer download. The returned promise settles when the
   // transfer actually completes or fails, so the button state reflects reality.
   const triggerDownload = async (senderSocketId: string, file: SharedFileMeta) => {
-    setDownloadingFiles(prev => ({ ...prev, [file.id]: true }));
+    setDownloadErrors(previous => ({ ...previous, [file.id]: '' }));
     try {
       await onDownloadFile(senderSocketId, file);
     } catch (err: any) {
-      console.error(err);
-      alert(err?.message || 'Dosya indirilemedi. Lütfen tekrar deneyin.');
-    } finally {
-      setDownloadingFiles(prev => ({ ...prev, [file.id]: false }));
+      if (err?.name !== 'AbortError') setDownloadErrors(previous => ({ ...previous, [file.id]: err?.message || 'Dosya indirilemedi. Lütfen tekrar deneyin.' }));
     }
   };
 
@@ -260,7 +268,8 @@ const Chat: React.FC<ChatProps> = ({
 
             // File Sharing Card Rendering (falls through to plain text on malformed metadata)
             if (fileMeta) {
-              const isDownloading = !!downloadingFiles[fileMeta.id];
+              const fileTransfers = transfers.filter(transfer => transfer.fileId === fileMeta.id);
+              const isDownloading = fileTransfers.some(transfer => transfer.direction === 'download' && transfer.status === 'active');
 
               return (
                 <div key={msg.id || index} className={`chat-bubble file-card-bubble ${isMe ? 'self' : 'other'}`}>
@@ -278,7 +287,7 @@ const Chat: React.FC<ChatProps> = ({
                     <div className="file-card-action">
                       {isMe ? (
                         <span className="file-status-sent">
-                          <Check size={12} style={{ marginRight: '4px' }} /> Gönderildi
+                          <Check size={12} style={{ marginRight: '4px' }} /> Paylaşıma hazır
                         </span>
                       ) : (
                         <button
@@ -296,6 +305,8 @@ const Chat: React.FC<ChatProps> = ({
                         </button>
                       )}
                     </div>
+                    <FileTransferStatus transfers={fileTransfers} onCancel={onCancelTransfer} />
+                    {!!downloadErrors[fileMeta.id] && <span className="device-error" role="alert">{downloadErrors[fileMeta.id]}</span>}
                   </div>
                   <span className="chat-time">{formatTime(msg.timestamp)}</span>
                 </div>
@@ -321,6 +332,11 @@ const Chat: React.FC<ChatProps> = ({
       </div>
 
       {/* Hidden File Input */}
+      {messages.some(message => !!parseFileMessage(message.text)) && <label className="file-rate-setting">Dosya aktarım hız sınırı
+        <select aria-label="Dosya aktarım hız sınırı" value={fileRate} onChange={event => onChangeFileRate(Number(event.target.value))}>
+          {FILE_RATE_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select><span>Her indirme ve toplam gönderim için geçerlidir. Karşı tarafın sınırı da hızı etkileyebilir.</span>
+      </label>}
       <input 
         type="file" 
         ref={fileInputRef} 

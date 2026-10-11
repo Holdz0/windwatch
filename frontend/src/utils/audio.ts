@@ -1,7 +1,26 @@
+import { loadMediaPreferences } from './mediaDevices';
+
 let sharedContext: AudioContext | null = null;
 const elements = new Set<HTMLMediaElement>();
+const outputElements = new Set<HTMLMediaElement>();
 const blocked = new Set<HTMLMediaElement>();
 let armed = false;
+let outputDevice = loadMediaPreferences().speaker;
+const outputJobs = new WeakMap<HTMLMediaElement, Promise<void>>();
+
+function routeOutput(element: HTMLMediaElement, deviceId: string): Promise<void> {
+  if (!element.setSinkId) return Promise.resolve();
+  const job = (outputJobs.get(element) || Promise.resolve()).catch(() => {}).then(() => element.setSinkId(deviceId));
+  outputJobs.set(element, job);
+  return job;
+}
+
+export async function setAudioOutput(deviceId: string): Promise<void> {
+  const before = outputDevice;
+  const targets = outputElements.size ? [...outputElements] : [new Audio()];
+  try { await Promise.all(targets.map(element => routeOutput(element, deviceId))); outputDevice = deviceId; }
+  catch (error) { await Promise.allSettled(targets.map(element => routeOutput(element, before))); throw error; }
+}
 
 export function getSharedAudioContext(): AudioContext {
   if (!sharedContext || sharedContext.state === 'closed') sharedContext = new AudioContext();
@@ -15,7 +34,7 @@ function reportPlayback(): void {
 
 export function playRemoteMediaElement(element: HTMLMediaElement): void {
   const source = element.srcObject;
-  void element.play().then(() => {
+  void (outputJobs.get(element) || Promise.resolve()).catch(() => {}).then(() => element.play()).then(() => {
     if (!elements.has(element) || element.srcObject !== source) return;
     blocked.delete(element);
     reportPlayback();
@@ -27,9 +46,22 @@ export function playRemoteMediaElement(element: HTMLMediaElement): void {
   });
 }
 
+export function registerAudioOutputElement(element: HTMLMediaElement): () => void {
+  outputElements.add(element);
+  void routeOutput(element, outputDevice).catch(async () => {
+    if (!outputElements.has(element)) return;
+    outputDevice = '';
+    await Promise.allSettled([...outputElements].map(target => routeOutput(target, '')));
+    window.dispatchEvent(new Event('windwatch:output-unavailable'));
+  });
+  return () => { outputElements.delete(element); };
+}
+
 export function registerRemoteMediaElement(element: HTMLMediaElement): () => void {
   elements.add(element);
+  const releaseOutput = registerAudioOutputElement(element);
   return () => {
+    releaseOutput();
     elements.delete(element);
     blocked.delete(element);
     reportPlayback();
@@ -44,6 +76,7 @@ export function unlockAudioPlayback(): void {
 export function primeAudioUnlock(): void {
   if (armed) return;
   armed = true;
+  outputDevice = loadMediaPreferences().speaker;
   window.addEventListener('pointerdown', unlockAudioPlayback, { capture: true, passive: true });
   window.addEventListener('keydown', unlockAudioPlayback, { capture: true });
 }
@@ -53,6 +86,7 @@ export function resetAudioUnlock(): void {
   window.removeEventListener('pointerdown', unlockAudioPlayback, { capture: true });
   window.removeEventListener('keydown', unlockAudioPlayback, { capture: true });
   elements.clear();
+  outputElements.clear();
   blocked.clear();
   if (sharedContext) void sharedContext.close().catch(() => {});
   sharedContext = null;

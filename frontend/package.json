@@ -11,6 +11,8 @@
     "test": "playwright test"
   },
   "dependencies": {
+    "@vimeo/player": "^2.30.4",
+    "hls.js": "^1.7.3",
     "lucide-react": "^0.378.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

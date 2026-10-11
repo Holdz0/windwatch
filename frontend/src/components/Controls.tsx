@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Mic, MicOff, Video, VideoOff,
-  Monitor, MessageSquare, LogOut, Settings2, SlidersHorizontal, SwitchCamera
+  Monitor, MessageSquare, LogOut, Settings2, SlidersHorizontal, SwitchCamera, Leaf, Headphones
 } from 'lucide-react';
 import {
   SCREEN_SHARE_PRESETS,
@@ -11,6 +11,8 @@ import {
   formatBitrate
 } from '../utils/screenShare';
 import type { BuiltInScreenShareQuality, ScreenShareQuality, CustomScreenShareSettings } from '../utils/screenShare';
+import type { SaverStats } from '../utils/saver';
+import SaverStatus from './SaverStatus';
 
 interface ControlsProps {
   isAudioMuted: boolean;
@@ -24,6 +26,7 @@ interface ControlsProps {
   onLeave: () => void;
   screenQuality: ScreenShareQuality;
   onChangeScreenQuality: (quality: ScreenShareQuality) => void;
+  readSaverStats: () => Promise<SaverStats | null>;
   /** Username of another member currently sharing, if any */
   screenShareBlockedBy?: string;
   audioBusy: boolean;
@@ -37,6 +40,7 @@ interface ControlsProps {
   isSwitchingCamera: boolean;
   facingMode: 'user' | 'environment';
   onSwitchCamera: () => void;
+  onOpenDeviceSettings: () => void;
 }
 
 const QUALITY_ORDER: BuiltInScreenShareQuality[] = ['saver', 'detail', 'balanced', 'motion'];
@@ -74,6 +78,7 @@ const Controls: React.FC<ControlsProps> = ({
   onLeave,
   screenQuality,
   onChangeScreenQuality,
+  readSaverStats,
   screenShareBlockedBy,
   audioBusy,
   videoBusy,
@@ -84,7 +89,8 @@ const Controls: React.FC<ControlsProps> = ({
   canSwitchCamera,
   isSwitchingCamera,
   facingMode,
-  onSwitchCamera
+  onSwitchCamera,
+  onOpenDeviceSettings
 }) => {
   const [isQualityMenuOpen, setIsQualityMenuOpen] = useState(false);
   const qualityMenuRef = useRef<HTMLDivElement | null>(null);
@@ -130,7 +136,7 @@ const Controls: React.FC<ControlsProps> = ({
   const isShareBlocked = !isScreenSharing && !!screenShareBlockedBy;
 
   return (
-    <div className="controls-container">
+    <div className={`controls-container${isQualityMenuOpen ? ' settings-open' : ''}`}>
       {/* Mic Button */}
       <button
         onClick={toggleAudio}
@@ -196,12 +202,12 @@ const Controls: React.FC<ControlsProps> = ({
         <button
           type="button"
           onClick={() => setIsQualityMenuOpen(prev => !prev)}
-          className={`ctrl-btn ctrl-quality ${isQualityMenuOpen ? 'active' : ''}`}
-          title="Ekran Paylaşımı Kalitesi"
+          className={`ctrl-btn ctrl-quality ${isQualityMenuOpen || screenQuality === 'saver' ? 'active' : ''}`}
+          title={`Ekran paylaşımı kalitesi: ${screenQuality === 'custom' ? 'Özel' : SCREEN_SHARE_PRESETS[screenQuality].label}`}
           aria-label="Ekran paylaşımı ayarları"
           aria-expanded={isQualityMenuOpen}
         >
-          <Settings2 size={20} />
+          {screenQuality === 'saver' ? <Leaf size={20} /> : <Settings2 size={20} />}
         </button>
 
         {isQualityMenuOpen && (
@@ -214,6 +220,7 @@ const Controls: React.FC<ControlsProps> = ({
                   key={q}
                   type="button"
                   className={`quality-option ${screenQuality === q ? 'selected' : ''}`}
+                  aria-pressed={screenQuality === q}
                   onClick={() => {
                     onChangeScreenQuality(q);
                     setIsQualityMenuOpen(false);
@@ -222,16 +229,21 @@ const Controls: React.FC<ControlsProps> = ({
                   <span className="quality-option-label">{preset.label}</span>
                   <span className="quality-option-hint">{preset.hint}</span>
                   <span className="quality-option-specs">
-                    {preset.maxHeight}p · {preset.frameRate} fps · {preset.maxBitrate / 1_000_000} Mbps
+                    {q === 'saver'
+                      ? '1080p / 30 fps’e kadar · en fazla 500 kbps / izleyici'
+                      : `${preset.maxHeight}p · ${preset.frameRate} fps · ${preset.maxBitrate / 1_000_000} Mbps`}
                   </span>
                 </button>
               );
             })}
 
+            {screenQuality === 'saver' && isScreenSharing && <SaverStatus readStats={readSaverStats} />}
+
             {/* Custom (manual) profile */}
             <button
               type="button"
               className={`quality-option ${screenQuality === 'custom' ? 'selected' : ''}`}
+              aria-pressed={screenQuality === 'custom'}
               onClick={() => onChangeScreenQuality('custom')}
             >
               <span className="quality-option-label">
@@ -322,6 +334,9 @@ const Controls: React.FC<ControlsProps> = ({
       </button>
 
       {/* Leave Room Button */}
+      <button type="button" onClick={onOpenDeviceSettings} className="ctrl-btn" title="Ses ve görüntü cihazları" aria-label="Cihaz ayarları">
+        <Headphones size={20} />
+      </button>
       <button
         onClick={onLeave}
         aria-label="Odadan ayrıl"

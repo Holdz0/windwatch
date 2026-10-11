@@ -10,6 +10,7 @@ const {
   pushRoomMessage
 } = require('./rooms');
 const { randomUUID } = require('node:crypto');
+const { installWatch, snapshot: watchSnapshot, removeWatchMember } = require('./watch');
 
 // Helper to cap text lengths (HTML escaping is handled safely on the frontend by React)
 function sanitize(input, maxLength) {
@@ -102,6 +103,8 @@ module.exports = (io) => {
   function removeMember(room, clientId, leaveText) {
     const user = removeUser(room, clientId);
     if (!user) return;
+    removeWatchMember(room, user);
+    io.to(room.roomId).emit('watch-state', watchSnapshot(room));
 
     const memberSocket = io.sockets.sockets.get(user.socketId);
     if (memberSocket && memberSocket.data.roomId === room.roomId) {
@@ -138,6 +141,7 @@ module.exports = (io) => {
 
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
+    installWatch(io, socket, currentMember);
     const payloadEvents = new Set(['join-room', 'send-message', 'media-state',
       'toggle-screen-share', 'kick-user', 'mute-user-request', 'rtc-signal']);
     socket.use(([event, payload], next) => {
@@ -196,6 +200,7 @@ module.exports = (io) => {
 
       const previousSocketId = existing ? existing.socketId : null;
       const previousPeerId = existing ? existing.peerId : null;
+      if (room.watch && previousPeerId && previousPeerId !== cleanPeerId) delete room.watch.statuses[previousPeerId];
 
       upsertUser(room, {
         clientId: cleanClientId,
@@ -235,6 +240,7 @@ module.exports = (io) => {
       broadcastRoomUsers(room);
       socket.emit('room-history', room.messages);
       socket.emit('room-locked-status', { isLocked: room.isLocked });
+      io.to(room.roomId).emit('watch-state', watchSnapshot(room));
 
       if (!existing) {
         console.log(`User ${cleanUsername} (${socket.id}) joined room ${cleanRoomId}`);

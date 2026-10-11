@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "WindWatch Video Yardımcısı",
+  "version": "1.0.0",
+  "description": "İzin verdiğiniz WindWatch odası için seçilen kaynak sekmesindeki videoyu tespit eder ve senkronize eder.",
+  "permissions": ["storage", "scripting", "tabs", "webRequest"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "WindWatch Video Yardımcısı" },
+  "content_scripts": [{ "matches": ["http://*/*", "https://*/*"], "js": ["bridge.js"], "run_at": "document_start" }]
+}

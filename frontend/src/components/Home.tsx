@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Video, ArrowRight, Loader, User, Link as LinkIcon, Plus, LogIn, Lock } from 'lucide-react';
 import { loadSavedUsername } from '../utils/session';
 import { BACKEND_URL } from '../utils/config';
+import DeviceSettings from './DeviceSettings';
+import { useMediaDevices } from '../utils/mediaDevices';
 
 interface HomeProps {
   onJoinRoom: (roomId: string, username: string, password?: string) => void;
@@ -15,6 +17,14 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
   const [roomIdInput, setRoomIdInput] = useState(initialRoomId || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(notice ?? null);
+  const [showDevices, setShowDevices] = useState(false);
+  const { preferences, devices, deviceRevision, choose } = useMediaDevices();
+  useEffect(() => {
+    if (!deviceRevision) return;
+    for (const [kind, deviceKind] of [['microphone', 'audioinput'], ['camera', 'videoinput'], ['speaker', 'audiooutput']] as const) {
+      if (preferences[kind] && !devices.some(device => device.kind === deviceKind && device.deviceId === preferences[kind])) choose(kind, '');
+    }
+  }, [deviceRevision, devices, preferences, choose]);
 
   useEffect(() => {
     if (notice) setError(notice);
@@ -98,7 +108,7 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
   };
 
   return (
-    <div className="landing-container">
+    <div className={`landing-container${showDevices ? ' devices-open' : ''}`}>
       <div className="landing-card">
         {/* Brand Header */}
         <div className="brand-container">
@@ -149,6 +159,10 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
         )}
 
         {/* Form rendering based on active state */}
+        <button type="button" className="home-device-button" aria-expanded={showDevices} onClick={() => setShowDevices(value => !value)}>
+          {showDevices ? 'Cihaz testlerini kapat' : 'Kamera ve ses cihazlarını kontrol et'}
+        </button>
+        {showDevices && <DeviceSettings preferences={preferences} devices={devices} onChange={choose} />}
         <div className="tab-content-wrapper">
           {activeTab === 'create' ? (
             <form onSubmit={handleCreateRoom} className="fade-in">

@@ -27,13 +27,13 @@ export const SCREEN_SHARE_PRESETS: Record<BuiltInScreenShareQuality, ScreenShare
   saver: {
     id: 'saver',
     label: 'Tasarruf',
-    hint: 'Zayıf internet için: düşük kare hızı, en az veri harcaması.',
+    hint: 'Az veriyle akıcı paylaşım. Sabit yazılar net kalır; harekette çözünürlük uyarlanır.',
     contentHint: 'detail',
-    maxWidth: 1280,
-    maxHeight: 720,
-    frameRate: 10,
-    maxBitrate: 700_000,
-    degradationPreference: 'maintain-resolution'
+    maxWidth: 1920,
+    maxHeight: 1080,
+    frameRate: 30,
+    maxBitrate: 500_000,
+    degradationPreference: 'maintain-framerate'
   },
   detail: {
     id: 'detail',
@@ -246,6 +246,8 @@ export interface VideoEncodingOptions {
   maxBitrate: number;
   maxFramerate?: number;
   degradationPreference?: RTCDegradationPreference;
+  scaleResolutionDownBy?: number;
+  priority?: RTCPriorityType;
 }
 
 /**
@@ -265,6 +267,9 @@ export async function applyVideoEncoding(
     const encoding = params.encodings[0];
     encoding.maxBitrate = opts.maxBitrate;
     if (opts.maxFramerate !== undefined) encoding.maxFramerate = opts.maxFramerate;
+    // Reset scaling and priority when leaving saver mode as well.
+    encoding.scaleResolutionDownBy = opts.scaleResolutionDownBy ?? 1;
+    encoding.priority = opts.priority ?? 'low';
     if (opts.degradationPreference) {
       params.degradationPreference = opts.degradationPreference;
     }
@@ -275,6 +280,20 @@ export async function applyVideoEncoding(
     // Encoding hints are optional; native congestion control still runs.
     return false;
   }
+}
+
+/** Audio retains its own bitrate budget, independent of either video sender. */
+export async function applyAudioEncoding(sender: RTCRtpSender, maxBitrate?: number): Promise<boolean> {
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings?.length) return false;
+    const encoding = params.encodings[0];
+    if (maxBitrate === undefined) delete encoding.maxBitrate;
+    else encoding.maxBitrate = maxBitrate;
+    encoding.priority = 'high';
+    await sender.setParameters(params);
+    return true;
+  } catch { return false; }
 }
 
 /**
