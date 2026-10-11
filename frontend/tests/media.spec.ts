@@ -643,6 +643,62 @@ test('real WebRTC carries mic, camera and share separately; mobile chat preserve
   } finally { await host.context.close(); await viewer.context.close(); }
 });
 
+test('late joins receive every active media channel and file history without restarting existing streams', async ({ browser, request }) => {
+  const id = await createRoom(request);
+  const host = await member(browser, id, 'Yayıncı');
+  const first = await member(browser, id, 'İlk izleyici');
+  let late: Awaited<ReturnType<typeof member>> | undefined;
+  try {
+    await connected(host.page, 1);
+    await host.page.getByRole('button', { name: 'Mikrofonu aç', exact: true }).click();
+    await host.page.getByRole('button', { name: 'Kamerayı aç', exact: true }).click();
+    await host.page.getByRole('button', { name: 'Ekranını paylaş', exact: true }).click();
+    await first.page.getByRole('button', { name: 'Mikrofonu aç', exact: true }).click();
+    const fileBytes = Buffer.from(Array.from({ length: 64 * 1024 + 31 }, (_, index) => index % 251));
+    await host.page.locator('input[type="file"]').setInputFiles({ name: 'katılmadan-once.bin', mimeType: 'application/octet-stream', buffer: fileBytes });
+    await expect(first.page.locator('.file-name')).toHaveText('katılmadan-once.bin');
+    const originalTracks = (await senderParameters(host.page)).map(sender => sender.trackId);
+    const hostPeerId = await host.page.locator('[data-connection-state="local"]').getAttribute('data-peer-id');
+    const before = await outboundBytes(host.page, 2);
+
+    late = await member(browser, id, 'Sonradan gelen', true);
+    await connected(late.page, 2); await connected(host.page, 2); await connected(first.page, 2);
+    await expect(late.page.locator('.screen-share')).toHaveCount(1);
+    await expect.poll(() => late!.page.locator('.screen-share video').evaluate(video => (video as HTMLVideoElement).videoWidth)).toBeGreaterThan(0);
+    // Verify received/decoded RTP, including camera hidden by mobile layout.
+    await expect.poll(() => late!.page.evaluate(async () => {
+      const pcs = (window as any).testConnections.filter((pc: RTCPeerConnection) => pc.connectionState === 'connected') as RTCPeerConnection[];
+      const channels = await Promise.all(pcs.map(async pc => {
+        const mids = pc.getTransceivers().map(transceiver => transceiver.mid);
+        const received = [0, 0, 0, 0];
+        const reports = await pc.getStats();
+        reports.forEach((report: any) => {
+          if (report.type !== 'inbound-rtp') return;
+          const slot = mids.indexOf(report.mid);
+          if (slot >= 0 && report.bytesReceived > 0 && (report.kind !== 'video' || report.framesDecoded > 0))
+            received[slot] = report.bytesReceived;
+        });
+        return received;
+      }));
+      return channels.some(slots => slots.every(bytes => bytes > 0));
+    })).toBe(true);
+    await expect.poll(() => late!.page.locator(`[data-audio-peer="${hostPeerId}"] audio`).evaluateAll(elements =>
+      elements.length === 2 && elements.every(element => !(element as HTMLAudioElement).paused))).toBe(true);
+    await late.page.getByRole('button', { name: 'Mikrofonu aç', exact: true }).click();
+    await expect.poll(() => outboundBytes(late!.page, 0)).toBeGreaterThan(0);
+    await late.page.getByRole('button', { name: 'Sohbeti göster', exact: true }).click();
+    await expect(late.page.locator('.file-name')).toHaveText('katılmadan-once.bin');
+    const download = late.page.waitForEvent('download');
+    await late.page.getByRole('button', { name: 'P2P İndir', exact: true }).click();
+    const file = await download, stream = await file.createReadStream(), chunks = [];
+    for await (const chunk of stream!) chunks.push(chunk);
+    expect(Buffer.concat(chunks)).toEqual(fileBytes);
+    expect((await senderParameters(host.page)).map(sender => sender.trackId)).toEqual(originalTracks);
+    await expect.poll(() => outboundBytes(host.page, 2)).toBeGreaterThan(before);
+    expect(await host.page.evaluate(() => (window as any).testConnections.length)).toBe(2);
+  } finally { await host.context.close(); await first.context.close(); await late?.context.close(); }
+});
+
 test('late joiners receive active share; unfiltered desktop audio is never sent', async ({ browser, request }) => {
   const id = await createRoom(request);
   const host = await member(browser, id, 'Paylaşan');
