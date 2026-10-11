@@ -4,20 +4,22 @@
   "description": "Backend for anonymous video, audio and screen sharing platform",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --watch --env-file-if-exists=.env src/server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
-    "peer": "^1.0.2",
-    "socket.io": "^4.7.5",
-    "uuid": "^14.0.1"
+    "socket.io": "^4.7.5"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.12.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "private": true
+    "socket.io-client": "^4.8.4"
+  }
 }

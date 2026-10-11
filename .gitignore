@@ -39,3 +39,5 @@ frontend/.env
 
 # Claude Code local config
 .claude/
+test-results/
+playwright-report/

@@ -1,4 +1,4 @@
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('node:crypto');
 
 // In-memory room storage.
 //
@@ -21,7 +21,7 @@ const EMPTY_ROOM_TTL_MS = 10 * 60 * 1000;
 const MAX_ROOM_MESSAGES = 50;
 
 function createRoom(password = null) {
-  const roomId = uuidv4();
+  const roomId = randomUUID();
   rooms.set(roomId, {
     roomId,
     users: new Map(),
@@ -52,6 +52,7 @@ function publicUsers(room) {
     isAudioMuted: u.isAudioMuted,
     isVideoMuted: u.isVideoMuted,
     isScreenSharing: u.isScreenSharing,
+    hasScreenAudio: u.hasScreenAudio,
     isReconnecting: u.isReconnecting
   }));
 }
@@ -86,6 +87,7 @@ function upsertUser(room, { clientId, socketId, peerId, username, media }) {
   user.isAudioMuted = typeof media?.isAudioMuted === 'boolean' ? media.isAudioMuted : true;
   user.isVideoMuted = typeof media?.isVideoMuted === 'boolean' ? media.isVideoMuted : true;
   user.isScreenSharing = !!media?.isScreenSharing && !otherSharer;
+  user.hasScreenAudio = user.isScreenSharing && media?.hasScreenAudio === true;
   user.isReconnecting = false;
   if (user.graceTimer) {
     clearTimeout(user.graceTimer);

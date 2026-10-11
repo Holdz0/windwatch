@@ -26,8 +26,10 @@ interface ControlsProps {
   onChangeScreenQuality: (quality: ScreenShareQuality) => void;
   /** Username of another member currently sharing, if any */
   screenShareBlockedBy?: string;
-  allowDesktopAudio: boolean;
-  onToggleDesktopAudio: (enabled: boolean) => void;
+  audioBusy: boolean;
+  videoBusy: boolean;
+  screenBusy: boolean;
+  isConnected: boolean;
   screenCustomSettings: CustomScreenShareSettings;
   onChangeCustomScreenSettings: (partial: Partial<CustomScreenShareSettings>) => void;
   /** Shown only on devices that actually have a second camera, while it is on */
@@ -73,8 +75,10 @@ const Controls: React.FC<ControlsProps> = ({
   screenQuality,
   onChangeScreenQuality,
   screenShareBlockedBy,
-  allowDesktopAudio,
-  onToggleDesktopAudio,
+  audioBusy,
+  videoBusy,
+  screenBusy,
+  isConnected,
   screenCustomSettings,
   onChangeCustomScreenSettings,
   canSwitchCamera,
@@ -130,6 +134,10 @@ const Controls: React.FC<ControlsProps> = ({
       {/* Mic Button */}
       <button
         onClick={toggleAudio}
+        disabled={audioBusy}
+        aria-label={isAudioMuted ? 'Mikrofonu aç' : 'Mikrofonu kapat'}
+        aria-pressed={!isAudioMuted}
+        aria-busy={audioBusy}
         className={`ctrl-btn ctrl-mic ${isAudioMuted ? 'danger' : 'active'}`}
         title={isAudioMuted ? 'Sesi Aç' : 'Sesi Kapat'}
       >
@@ -139,6 +147,10 @@ const Controls: React.FC<ControlsProps> = ({
       {/* Video/Camera Button */}
       <button
         onClick={toggleVideo}
+        disabled={videoBusy}
+        aria-label={isVideoMuted ? 'Kamerayı aç' : 'Kamerayı kapat'}
+        aria-pressed={!isVideoMuted}
+        aria-busy={videoBusy}
         className={`ctrl-btn ctrl-video ${isVideoMuted ? 'danger' : 'active'}`}
         title={isVideoMuted ? 'Kamerayı Aç' : 'Kamerayı Kapat'}
       >
@@ -153,8 +165,8 @@ const Controls: React.FC<ControlsProps> = ({
           onClick={onSwitchCamera}
           disabled={isSwitchingCamera}
           className={`ctrl-btn ctrl-flip ${isSwitchingCamera ? 'is-disabled' : ''}`}
-          title={facingMode === 'user' ? 'Arka Kameraya Geç' : 'Ön Kameraya Geç'}
-          aria-label={facingMode === 'user' ? 'Arka kameraya geç' : 'Ön kameraya geç'}
+          title={facingMode === 'user' ? 'Diğer kameraya geç' : 'Önceki kameraya geç'}
+          aria-label="Kamerayı değiştir"
         >
           <SwitchCamera size={20} />
         </button>
@@ -163,7 +175,10 @@ const Controls: React.FC<ControlsProps> = ({
       {/* Screen Share Button */}
       <button
         onClick={toggleScreenShare}
-        disabled={isShareBlocked}
+        disabled={isShareBlocked || screenBusy || !isConnected || !navigator.mediaDevices?.getDisplayMedia}
+        aria-label={isScreenSharing ? 'Paylaşımı durdur' : 'Ekranını paylaş'}
+        aria-pressed={isScreenSharing}
+        aria-busy={screenBusy}
         className={`ctrl-btn ctrl-screen ${isScreenSharing ? 'active' : ''} ${isShareBlocked ? 'is-disabled' : ''}`}
         title={
           isShareBlocked
@@ -183,6 +198,8 @@ const Controls: React.FC<ControlsProps> = ({
           onClick={() => setIsQualityMenuOpen(prev => !prev)}
           className={`ctrl-btn ctrl-quality ${isQualityMenuOpen ? 'active' : ''}`}
           title="Ekran Paylaşımı Kalitesi"
+          aria-label="Ekran paylaşımı ayarları"
+          aria-expanded={isQualityMenuOpen}
         >
           <Settings2 size={20} />
         </button>
@@ -284,26 +301,10 @@ const Controls: React.FC<ControlsProps> = ({
               </div>
             )}
 
-            <div className="quality-menu-section">
-              <label className="quality-toggle">
-                <input
-                  type="checkbox"
-                  checked={allowDesktopAudio}
-                  onChange={(e) => onToggleDesktopAudio(e.target.checked)}
-                />
-                <span className="quality-toggle-text">
-                  <span className="quality-option-label">Masaüstü sesini paylaş</span>
-                  <span className="quality-option-hint">
-                    Steam, Discord ve oyun sesleri de paylaşılır. Tüm ekran paylaşımında
-                    konuşan katılımcılar kendi seslerini yankı olarak duyabilir.
-                  </span>
-                </span>
-              </label>
-            </div>
-
             <div className="quality-menu-footer">
-              Paylaşım sürerken de değiştirilebilir. Sekme paylaşımında o sekmenin sesi
-              her zaman gönderilir.
+              Paylaşım penceresinde “Sesi paylaş” seçeneğini işaretleyin. Desteklenen
+              tarayıcılarda WindWatch sesi otomatik olarak hariç tutulur. Mikrofonunuz
+              ekran sesinden bağımsızdır.
             </div>
           </div>
         )}
@@ -312,6 +313,8 @@ const Controls: React.FC<ControlsProps> = ({
       {/* Chat Pane Toggle Button */}
       <button
         onClick={toggleChat}
+        aria-label={isChatOpen ? 'Sohbeti gizle' : 'Sohbeti göster'}
+        aria-pressed={isChatOpen}
         className={`ctrl-btn ctrl-chat ${isChatOpen ? 'active' : ''}`}
         title={isChatOpen ? 'Sohbeti Gizle' : 'Sohbeti Göster'}
       >
@@ -321,6 +324,7 @@ const Controls: React.FC<ControlsProps> = ({
       {/* Leave Room Button */}
       <button
         onClick={onLeave}
+        aria-label="Odadan ayrıl"
         className="ctrl-btn ctrl-leave danger"
         title="Odadan Ayrıl"
         style={{ marginLeft: '12px' }}
@@ -331,6 +335,4 @@ const Controls: React.FC<ControlsProps> = ({
   );
 };
 
-// Memoised: the room re-renders on stats/participant updates, and this
-// subtree is comparatively expensive to rebuild for no visual change.
-export default React.memo(Controls);
+export default Controls;

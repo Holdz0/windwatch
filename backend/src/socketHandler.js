@@ -9,6 +9,7 @@ const {
   sweepRooms,
   pushRoomMessage
 } = require('./rooms');
+const { randomUUID } = require('node:crypto');
 
 // Helper to cap text lengths (HTML escaping is handled safely on the frontend by React)
 function sanitize(input, maxLength) {
@@ -18,7 +19,7 @@ function sanitize(input, maxLength) {
     str = str.substring(0, maxLength);
   }
   // Remove control/non-printable characters for general safety
-  return str.replace(/[\x00-\x1F\x7F-\x9F]/g, "");
+  return str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "");
 }
 
 // Generic sliding-window rate limiter keyed by socket ID
@@ -45,6 +46,9 @@ function createRateLimiter(maxPerWindow, windowMs) {
 const messageLimiter = createRateLimiter(15, 2000);
 // Join attempts are cheap lookups but the success path broadcasts to the room, so cap them too
 const joinLimiter = createRateLimiter(8, 10000);
+const signalLimiter = createRateLimiter(600, 10000);
+const mediaLimiter = createRateLimiter(30, 1000);
+const MAX_ROOM_USERS = 8;
 
 // Text messages are capped at 500 chars; file-offer metadata needs more headroom
 const MAX_TEXT_LENGTH = 500;
@@ -58,6 +62,7 @@ const RECONNECT_GRACE_MS = 20000;
 
 function makeSystemMessage(text) {
   return {
+    id: randomUUID(),
     senderId: 'system',
     senderName: 'Sistem',
     text,
@@ -115,7 +120,7 @@ module.exports = (io) => {
 
   // Periodically reclaim rooms that stayed empty past their TTL, and drop
   // "phantom" members whose socket vanished without a disconnect event.
-  setInterval(() => {
+  const sweepTimer = setInterval(() => {
     const connected = io.sockets.sockets;
     for (const room of listRooms()) {
       for (const user of Array.from(room.users.values())) {
@@ -129,9 +134,19 @@ module.exports = (io) => {
       console.log(`Room sweeper: reclaimed ${deleted} empty room(s).`);
     }
   }, 30000).unref();
+  io.httpServer.once('close', () => clearInterval(sweepTimer));
 
   io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
+    const payloadEvents = new Set(['join-room', 'send-message', 'media-state',
+      'toggle-screen-share', 'kick-user', 'mute-user-request', 'rtc-signal']);
+    socket.use(([event, payload], next) => {
+      if (payloadEvents.has(event) && (!payload || typeof payload !== 'object' || Array.isArray(payload))) {
+        return next(new Error('Geçersiz istek.'));
+      }
+      next();
+    });
+    socket.on('error', () => socket.emit('warning-msg', 'Geçersiz istek.'));
 
     // 1. Join (or silently rejoin) a room
     socket.on('join-room', ({ roomId, peerId, clientId, username, password, media } = {}) => {
@@ -156,6 +171,12 @@ module.exports = (io) => {
       }
 
       const existing = room.users.get(cleanClientId);
+      if (!existing && room.users.size >= MAX_ROOM_USERS) {
+        return socket.emit('error-msg', `Oda dolu. En fazla ${MAX_ROOM_USERS} katılımcı katılabilir.`);
+      }
+      if (Array.from(room.users.values()).some(user => user.peerId === cleanPeerId && user.clientId !== cleanClientId)) {
+        return socket.emit('error-msg', 'Bağlantı kimliği başka bir katılımcı tarafından kullanılıyor.');
+      }
 
       // A known member coming back (reconnect/reload) already passed these checks
       if (!existing) {
@@ -202,7 +223,7 @@ module.exports = (io) => {
       }
 
       // Members call whoever has a new peer id (fresh join, or a reload that
-      // created a new PeerJS identity)
+      // created a new media identity)
       if (previousPeerId !== cleanPeerId) {
         socket.to(cleanRoomId).emit('user-connected', {
           socketId: socket.id,
@@ -227,6 +248,22 @@ module.exports = (io) => {
       if (member) removeMember(member.room, member.user.clientId);
     });
 
+    // Signalling is relayed only between connected members of the same room.
+    // Media and files travel directly over the resulting RTCPeerConnection.
+    socket.on('rtc-signal', ({ targetPeerId, signal } = {}) => {
+      if (signalLimiter.isLimited(socket.id)) return;
+      const member = currentMember(socket);
+      if (!member || !signal || typeof signal !== 'object' || Array.isArray(signal)) return;
+      if (typeof signal.sessionId !== 'string' || signal.sessionId.length > 100) return;
+      const target = Array.from(member.room.users.values()).find(user => user.peerId === targetPeerId);
+      if (!target || target === member.user || target.isReconnecting) return;
+      if (signal.description && (!['offer', 'answer'].includes(signal.description.type) ||
+          typeof signal.description.sdp !== 'string' || signal.description.sdp.length > 128000)) return;
+      if (signal.candidate && (typeof signal.candidate.candidate !== 'string' || signal.candidate.candidate.length > 4000)) return;
+      if (!signal.description && !signal.candidate && signal.restart !== true) return;
+      io.to(target.socketId).emit('rtc-signal', { peerId: member.user.peerId, signal });
+    });
+
     // 2. Chat Message Event
     socket.on('send-message', ({ roomId, text } = {}) => {
       if (messageLimiter.isLimited(socket.id)) {
@@ -243,7 +280,9 @@ module.exports = (io) => {
       }
 
       const newMessage = {
+        id: randomUUID(),
         senderId: socket.id,
+        senderPeerId: member.user.peerId,
         senderName: member.user.username,
         text: cleanText,
         timestamp: new Date().toISOString()
@@ -254,24 +293,31 @@ module.exports = (io) => {
     });
 
     // 2.4 Media (mute) State Sync Event
-    socket.on('media-state', ({ isAudioMuted, isVideoMuted } = {}) => {
+    socket.on('media-state', ({ isAudioMuted, isVideoMuted, hasScreenAudio } = {}) => {
+      if (mediaLimiter.isLimited(socket.id)) return;
       const member = currentMember(socket);
       if (!member) return;
+      const changed = (typeof isAudioMuted === 'boolean' && member.user.isAudioMuted !== isAudioMuted) ||
+        (typeof isVideoMuted === 'boolean' && member.user.isVideoMuted !== isVideoMuted) ||
+        (typeof hasScreenAudio === 'boolean' && member.user.hasScreenAudio !== (member.user.isScreenSharing && hasScreenAudio));
+      if (!changed) return;
       if (typeof isAudioMuted === 'boolean') member.user.isAudioMuted = isAudioMuted;
       if (typeof isVideoMuted === 'boolean') member.user.isVideoMuted = isVideoMuted;
+      if (typeof hasScreenAudio === 'boolean') member.user.hasScreenAudio = member.user.isScreenSharing && hasScreenAudio;
       broadcastRoomUsers(member.room);
     });
 
     // 2.5 Screen Share Toggle Event.
     // Acknowledged, because only one member may share at a time and the client
     // has to stop its already-captured display stream when it loses the race.
-    socket.on('toggle-screen-share', ({ isSharing } = {}, ack) => {
+    socket.on('toggle-screen-share', ({ isSharing, hasAudio } = {}, ack) => {
       const respond = (payload) => {
         if (typeof ack === 'function') ack(payload);
       };
 
       const member = currentMember(socket);
       if (!member) return respond({ ok: false, reason: 'no-room' });
+      if (typeof isSharing !== 'boolean') return respond({ ok: false, reason: 'invalid' });
       const { room, user } = member;
 
       if (isSharing) {
@@ -288,6 +334,7 @@ module.exports = (io) => {
 
       const changed = user.isScreenSharing !== !!isSharing;
       user.isScreenSharing = !!isSharing;
+      user.hasScreenAudio = isSharing && hasAudio === true;
       respond({ ok: true });
       broadcastRoomUsers(room);
 
@@ -344,6 +391,8 @@ module.exports = (io) => {
       console.log(`Socket disconnected: ${socket.id}`);
       messageLimiter.clear(socket.id);
       joinLimiter.clear(socket.id);
+      signalLimiter.clear(socket.id);
+      mediaLimiter.clear(socket.id);
 
       const member = currentMember(socket);
       if (!member) return;
@@ -355,7 +404,7 @@ module.exports = (io) => {
         if (room.users.get(user.clientId) === user && user.isReconnecting && user.socketId === socket.id) {
           removeMember(room, user.clientId);
         }
-      }, RECONNECT_GRACE_MS);
+      }, RECONNECT_GRACE_MS).unref();
       broadcastRoomUsers(room);
     });
   });

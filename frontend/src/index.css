@@ -160,54 +160,6 @@ body {
 }
 
 /* Background animated glow mesh blobs */
-.bg-glow {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.15;
-  pointer-events: none;
-  mix-blend-mode: screen;
-}
-
-.blob-1 {
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, #2563eb 0%, transparent 80%);
-  top: -100px;
-  left: -100px;
-  animation: floatBlob 25s infinite alternate ease-in-out;
-}
-
-.blob-2 {
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, var(--color-violet) 0%, transparent 80%);
-  bottom: -150px;
-  right: -100px;
-  animation: floatBlob 30s infinite alternate-reverse ease-in-out;
-}
-
-.blob-3 {
-  width: 400px;
-  height: 400px;
-  background: radial-gradient(circle, var(--color-cyan) 0%, transparent 80%);
-  top: 40%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  animation: floatBlob 20s infinite alternate ease-in-out;
-}
-
-@keyframes floatBlob {
-  0% {
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    transform: translate(40px, -60px) scale(1.1);
-  }
-  100% {
-    transform: translate(-20px, 30px) scale(0.95);
-  }
-}
 
 .landing-card {
   width: 100%;
@@ -543,10 +495,47 @@ body {
   width: 100%;
   height: 100%;
   max-width: 1200px;
-  max-height: 700px;
+  max-height: none;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  grid-auto-rows: 1fr;
+  grid-auto-rows: minmax(0, 1fr);
+  min-height: 0;
 }
+
+.remote-audio { display: none; }
+.video-grid.focused-grid {
+  max-width: none;
+  max-height: none;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  grid-template-rows: minmax(0, 1fr) 120px;
+  grid-auto-rows: 120px;
+  gap: 12px;
+}
+.video-grid.focused-grid .focused-card {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
+}
+.video-grid.focused-grid .video-card:not(.focused-card) {
+  height: 120px;
+  min-width: 0;
+  aspect-ratio: auto;
+}
+.video-grid.focused-grid.hide-thumbnails { grid-template-rows: minmax(0, 1fr); }
+.video-card.thumbnail-hidden { display: none; }
+.video-grid.focused-grid .video-card:not(.focused-card) .avatar-placeholder { width: 38px; height: 38px; font-size: 1rem; }
+.video-grid.focused-grid .video-card:not(.focused-card) .user-tag { padding: 4px 6px; bottom: 4px; left: 4px; max-width: calc(100% - 8px); }
+.media-connection-label { position: absolute; bottom: 44px; font-size: 0.75rem; padding: 6px; color: var(--color-text-secondary); background: var(--bg-secondary); }
+.connection-pending::before { background: var(--color-yellow); }
+.audio-unlock-banner { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border: 0; background: var(--color-blue); color: white; cursor: pointer; }
+.ctrl-btn:disabled { cursor: wait; opacity: 0.45; }
+.room-id-tag { background: transparent; border: 0; color: inherit; text-align: left; cursor: pointer; }
+
+.room-container.immersive-stage .focused-grid { grid-template-rows: minmax(0, 1fr); gap: 0; }
+.room-container.immersive-stage .focused-grid .video-card:not(.focused-card) { display: none; }
+.room-container.immersive-stage .focused-card { border: none; border-radius: 0; }
+.room-container.immersive-stage .focused-card video { object-fit: contain; }
 
 .video-grid.count-1 {
   grid-template-columns: 1fr;
@@ -571,7 +560,9 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
-  aspect-ratio: 16/9;
+  aspect-ratio: auto;
+  min-height: 0;
+  height: 100%;
   animation: scaleIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transition: var(--transition-smooth);
 }
@@ -643,6 +634,8 @@ body {
   max-width: calc(100% - 24px);
   z-index: 5;
 }
+
+.user-tag > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .user-tag-host {
   color: var(--color-green);
@@ -723,52 +716,6 @@ body {
 }
 
 /* Screen Share split layouts */
-.screen-share-layout {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  gap: 20px;
-}
-
-.focused-stream-container {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 0;
-}
-
-.focused-stream-container .video-card {
-  width: 100%;
-  height: 100%;
-  max-width: 100%;
-  max-height: 100%;
-  aspect-ratio: auto;
-}
-
-.thumbnails-strip-container {
-  height: 110px;
-  display: flex;
-  gap: 14px;
-  overflow-x: auto;
-  padding: 4px;
-  justify-content: center;
-  align-items: center;
-}
-
-.thumbnails-strip-container .video-card {
-  width: 144px;
-  height: 81px;
-  flex-shrink: 0;
-  aspect-ratio: 16/9;
-}
-
-.thumbnails-strip-container .avatar-placeholder {
-  width: 36px;
-  height: 36px;
-  font-size: 0.85rem;
-}
 
 /* Control Bar Floating */
 .controls-container {
@@ -884,12 +831,6 @@ body {
   
   .video-grid {
     gap: 12px;
-  }
-  
-  .thumbnails-strip-container {
-    justify-content: flex-start; /* Prevent clipping hidden items on overflow scroll */
-    padding: 4px 12px;
-    -webkit-overflow-scrolling: touch;
   }
 }
 
@@ -1025,6 +966,7 @@ body {
 }
 
 .chat-header {
+  flex-shrink: 0;
   padding: 24px;
   border-bottom: 1px solid var(--border-glass);
   display: flex;
@@ -1033,6 +975,7 @@ body {
 }
 
 .chat-messages {
+  min-height: 0;
   flex: 1;
   padding: 24px;
   overflow-y: auto;
@@ -1098,6 +1041,7 @@ body {
 
 /* Chat Input Bar */
 .chat-input-form {
+  flex-shrink: 0;
   padding: 20px;
   border-top: 1px solid var(--border-glass);
   display: flex;
@@ -1105,6 +1049,7 @@ body {
 }
 
 .chat-input {
+  min-width: 0;
   flex: 1;
   padding: 10px 16px;
   background: rgba(255, 255, 255, 0.02);
@@ -1123,6 +1068,7 @@ body {
 }
 
 .chat-send-btn {
+  flex-shrink: 0;
   width: 38px;
   height: 38px;
   border-radius: var(--radius-sm);
@@ -1263,49 +1209,10 @@ body {
 /* Live outbound telemetry badge shown to the person sharing their screen.
    Top-centre keeps it clear of the action buttons (top-left) and the
    mute / connection badges (top-right). */
-.screen-stats-badge {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: rgba(0, 0, 0, 0.82);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border-glass);
-  border-radius: 4px;
-  padding: 5px 10px;
-  font-size: 0.7rem;
-  font-family: monospace;
-  color: var(--color-text-secondary);
-  z-index: 16;
-  pointer-events: none;
-  flex-wrap: wrap;
-  max-width: calc(100% - 24px);
-}
-
-.screen-stats-badge.limited {
-  border-color: var(--color-yellow);
-  color: var(--color-yellow-soft);
-}
-
-.screen-stats-warning {
-  font-family: inherit;
-  font-size: 0.66rem;
-  opacity: 0.9;
-}
 
 @media (max-width: 640px) {
   .quality-menu {
     width: 240px;
-  }
-
-  .screen-stats-badge {
-    top: 8px;
-    font-size: 0.62rem;
-    padding: 4px 8px;
   }
 }
 
@@ -1365,8 +1272,7 @@ body {
 /* Speaking Active Video Card Glow */
 .video-card.speaking-active {
   box-shadow: 0 0 0 3px var(--color-green), 0 0 25px rgba(16, 185, 129, 0.4);
-  transform: scale(1.01);
-  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: box-shadow 0.2s ease;
 }
 
 /* Pinned Video Card indicator */
@@ -1405,23 +1311,6 @@ body {
 }
 
 /* Connection Stats Badge (laid out inside .card-top-right-stack) */
-.connection-stats-badge {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: rgba(10, 10, 10, 0.6);
-  border: 1px solid var(--border-glass);
-  padding: 4px 8px;
-  border-radius: var(--radius-pill);
-  font-size: 0.7rem;
-  color: var(--color-text-secondary);
-  backdrop-filter: blur(10px);
-  white-space: nowrap;
-}
-
-.stats-icon {
-  color: var(--color-green);
-}
 
 /* Moderator Controls Overlay */
 .moderator-card-controls {
@@ -1776,8 +1665,7 @@ body {
     overflow: hidden !important;
   }
 
-  .video-workspace.mobile-ss-chat-active .video-grid, 
-  .video-workspace.mobile-ss-chat-active .screen-share-layout {
+  .video-workspace.mobile-ss-chat-active .video-grid {
     height: 42% !important;
     flex: none !important;
   }
@@ -1911,58 +1799,6 @@ body {
 /* --- Thumbnail strip cards ----------------------------------------------- */
 /* Thumbnails are 144x81; the full overlay set (volume slider, moderator bar,
    telemetry) is wider than the card itself and collided with the name tag. */
-.thumbnails-strip-container .volume-control,
-.thumbnails-strip-container .moderator-card-controls,
-.thumbnails-strip-container .screen-stats-badge,
-.thumbnails-strip-container .connection-stats-badge {
-  display: none;
-}
-
-.thumbnails-strip-container .card-top-left-actions {
-  top: 6px;
-  left: 6px;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-
-.thumbnails-strip-container .video-card:hover .card-top-left-actions {
-  opacity: 1;
-}
-
-.thumbnails-strip-container .card-top-left-actions button {
-  width: 22px;
-  height: 22px;
-}
-
-.thumbnails-strip-container .card-top-left-actions button svg {
-  width: 11px;
-  height: 11px;
-}
-
-.thumbnails-strip-container .card-top-right-stack {
-  top: 6px;
-  right: 6px;
-  gap: 4px;
-}
-
-.thumbnails-strip-container .status-badge {
-  padding: 3px;
-}
-
-.thumbnails-strip-container .status-badge svg {
-  width: 10px;
-  height: 10px;
-}
-
-.thumbnails-strip-container .user-tag {
-  bottom: 6px;
-  left: 6px;
-  padding: 3px 8px;
-  font-size: 0.62rem;
-  gap: 4px;
-  max-width: calc(100% - 12px);
-}
 
 /* --- Responsive corrections ---------------------------------------------- */
 @media (max-width: 640px) {
@@ -2016,9 +1852,6 @@ body {
   }
 
   /* Purely decorative motion is removed outright */
-  .bg-glow {
-    animation: none !important;
-  }
 
   .ctrl-btn:hover,
   .video-card.speaking-active,
@@ -2096,27 +1929,9 @@ body {
   overflow: hidden;
 }
 
-.room-container.immersive-stage .screen-share-layout {
-  gap: 0;
-}
-
 /* Secondary participants are dropped — the shared screen is the point */
-.room-container.immersive-stage .thumbnails-strip-container {
-  display: none;
-}
-
-.room-container.immersive-stage .focused-stream-container .video-card {
-  border: none;
-  border-radius: 0;
-  background: var(--bg-primary);
-  box-shadow: none;
-  animation: none;
-}
 
 /* Letterbox rather than crop, so no part of the shared screen is cut off */
-.room-container.immersive-stage .focused-stream-container .video-card video {
-  object-fit: contain;
-}
 
 /* Touch devices have no hover, so card overlays are shown outright while the
    chrome is visible (the ≤640px rules do not match a sideways phone, which
@@ -2137,8 +1952,7 @@ body {
 .room-container.immersive-stage.chrome-hidden .card-top-right-stack,
 .room-container.immersive-stage.chrome-hidden .user-tag,
 .room-container.immersive-stage.chrome-hidden .volume-control,
-.room-container.immersive-stage.chrome-hidden .moderator-card-controls,
-.room-container.immersive-stage.chrome-hidden .screen-stats-badge {
+.room-container.immersive-stage.chrome-hidden .moderator-card-controls {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.25s ease;
@@ -2186,40 +2000,6 @@ body {
 }
 
 /* Desktop-audio opt-in inside the screen share settings popover */
-.quality-menu-section {
-  border-top: 1px solid var(--border-glass);
-  margin-top: 4px;
-  padding-top: 6px;
-}
-
-.quality-toggle {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.quality-toggle:hover {
-  background: var(--tint-surface);
-}
-
-.quality-toggle input {
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  flex-shrink: 0;
-  accent-color: var(--color-blue);
-  cursor: pointer;
-}
-
-.quality-toggle-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
 
 
 /* Custom (manual) screen-share profile: resolution/fps selects + bitrate slider,
@@ -2236,10 +2016,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 5px;
-}
-
-.custom-setting-row-bitrate {
-  /* not a <label> like the selects — no cursor:pointer semantics needed */
 }
 
 .custom-setting-label {
@@ -2464,8 +2240,6 @@ button,
   .user-tag,
   .fullscreen-btn,
   .card-top-left-actions button,
-  .connection-stats-badge,
-  .screen-stats-badge,
   .volume-control,
   .moderator-card-controls,
   .chat-backdrop,
@@ -2476,8 +2250,6 @@ button,
   }
 
   .user-tag,
-  .connection-stats-badge,
-  .screen-stats-badge,
   .volume-control,
   .moderator-card-controls {
     background: rgba(12, 12, 12, 0.92);
@@ -2502,20 +2274,10 @@ button,
 
   /* The decorative background blobs are three large, permanently-animating
      120px-blur layers. They cost real frames on a phone for pure decoration. */
-  .bg-glow {
-    display: none;
-  }
 }
 
 /* Isolate each card's layout/paint work so one participant's updates (stats
    badge, speaking ring, track change) cannot invalidate the whole grid. */
-.video-card {
-  contain: layout paint style;
-}
-
-.chat-messages {
-  contain: layout paint style;
-}
 
 /* --- Lazy-loaded Room fallback -------------------------------------------- */
 

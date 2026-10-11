@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Video, ArrowRight, Loader, User, Link as LinkIcon, Plus, LogIn, Lock } from 'lucide-react';
 import { loadSavedUsername } from '../utils/session';
+import { BACKEND_URL } from '../utils/config';
 
 interface HomeProps {
   onJoinRoom: (roomId: string, username: string, password?: string) => void;
@@ -8,8 +9,6 @@ interface HomeProps {
   /** Why the user was returned here (kicked, room closed, ...) */
   notice?: string | null;
 }
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin);
 
 const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
   const [username, setUsername] = useState(loadSavedUsername);
@@ -34,6 +33,7 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
 
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     if (!username.trim()) {
       setError('Lütfen bir isim girin.');
       return;
@@ -44,20 +44,19 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
 
     try {
       const response = await fetch(`${BACKEND_URL}/create-room`, {
+        signal: AbortSignal.timeout(15000),
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: usePassword ? roomPassword : null })
       });
 
-      if (!response.ok) {
-        throw new Error('Oda oluşturulamadı.');
-      }
-
       const data = await response.json();
-      onJoinRoom(data.roomId, username, usePassword ? roomPassword : undefined);
+      if (!response.ok) throw new Error(data.error || 'Oda oluşturulamadı.');
+      onJoinRoom(data.roomId, username.trim(), usePassword ? roomPassword : undefined);
     } catch (err: any) {
       console.error(err);
-      setError('Sunucu bağlantı hatası. Lütfen sunucunun açık olduğundan emin olun.');
+      setError(err?.name === 'TimeoutError' ? 'Sunucu yanıt vermedi. Lütfen tekrar deneyin.' :
+        err?.message === 'Failed to fetch' ? 'Sunucuya bağlanılamadı. Bağlantınızı kontrol edin.' : err?.message || 'Oda oluşturulamadı.');
     } finally {
       setLoading(false);
     }
@@ -83,7 +82,7 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
         const url = new URL(targetRoomId);
         const pathParts = url.pathname.split('/');
         targetRoomId = pathParts[pathParts.length - 1] || targetRoomId;
-      } catch (err) {
+      } catch {
         // ignore
       }
     }
@@ -94,16 +93,12 @@ const Home: React.FC<HomeProps> = ({ onJoinRoom, initialRoomId, notice }) => {
     }
 
     setError(null);
-    onJoinRoom(targetRoomId, username);
+    try { targetRoomId = decodeURIComponent(targetRoomId); } catch { /* plain room id */ }
+    onJoinRoom(targetRoomId, username.trim());
   };
 
   return (
     <div className="landing-container">
-      {/* Dynamic Animated Background Glow Blobs */}
-      <div className="bg-glow blob-1"></div>
-      <div className="bg-glow blob-2"></div>
-      <div className="bg-glow blob-3"></div>
-
       <div className="landing-card">
         {/* Brand Header */}
         <div className="brand-container">

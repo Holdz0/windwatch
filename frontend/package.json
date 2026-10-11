@@ -7,16 +7,17 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "playwright test"
   },
   "dependencies": {
+    "lucide-react": "^0.378.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "lucide-react": "^0.378.0",
-    "peerjs": "^1.5.4",
     "socket.io-client": "^4.7.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -24,5 +25,8 @@
     "oxlint": "^1.71.0",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

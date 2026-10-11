@@ -78,7 +78,7 @@ export const DEFAULT_SCREEN_QUALITY: ScreenShareQuality = 'balanced';
 // connection (or a deliberately poor one) may want to pick exact numbers
 // instead. 'custom' resolves to a preset built from these numbers rather than
 // a fixed table entry — everything downstream (capture constraints, encoder
-// params, adaptive bitrate) already just consumes a ScreenSharePreset, so no
+// params) already just consumes a ScreenSharePreset, so no
 // other code needs to know custom mode exists.
 
 export interface CustomScreenShareSettings {
@@ -125,6 +125,7 @@ function degradationPreferenceForFrameRate(frameRate: number): RTCDegradationPre
 
 /** Builds the full preset for the custom profile from the user's chosen numbers. */
 export function buildCustomPreset(settings: CustomScreenShareSettings): ScreenSharePreset {
+  settings = normalizeCustomSettings(settings);
   return {
     id: 'custom',
     label: 'Özel',
@@ -150,13 +151,27 @@ export function resolveScreenSharePreset(
 /** Encoder settings used for the camera, restored when a screen share ends. */
 export const CAMERA_ENCODING = {
   maxBitrate: 1_500_000,
-  degradationPreference: 'balanced' as RTCDegradationPreference,
-  priority: 'low',
-  networkPriority: 'low'
+  maxFramerate: 30,
+  degradationPreference: 'balanced' as RTCDegradationPreference
 };
 
+export function normalizeCustomSettings(settings: Partial<CustomScreenShareSettings>): CustomScreenShareSettings {
+  const bound = (value: number | undefined, min: number, max: number, fallback: number) =>
+    typeof value === 'number' && Number.isFinite(value) ? Math.round(Math.min(max, Math.max(min, value))) : fallback;
+  return {
+    maxHeight: bound(settings.maxHeight, 480, 2160, DEFAULT_CUSTOM_SETTINGS.maxHeight),
+    frameRate: bound(settings.frameRate, 5, 60, DEFAULT_CUSTOM_SETTINGS.frameRate),
+    maxBitrate: bound(settings.maxBitrate, CUSTOM_BITRATE_BOUNDS.min, CUSTOM_BITRATE_BOUNDS.max, DEFAULT_CUSTOM_SETTINGS.maxBitrate)
+  };
+}
+
+export function supportsOwnAudioRestriction(): boolean {
+  return !!(navigator.mediaDevices?.getSupportedConstraints() as
+    (MediaTrackSupportedConstraints & { restrictOwnAudio?: boolean }) | undefined)?.restrictOwnAudio;
+}
+
 /** Capture constraints for getDisplayMedia derived from a preset. */
-export function buildDisplayMediaConstraints(preset: ScreenSharePreset): MediaStreamConstraints {
+export function buildDisplayMediaConstraints(preset: ScreenSharePreset, restrictOwnAudio = supportsOwnAudioRestriction()): DisplayMediaStreamOptions {
   return {
     video: {
       width: { max: preset.maxWidth },
@@ -170,14 +185,17 @@ export function buildDisplayMediaConstraints(preset: ScreenSharePreset): MediaSt
       // wreck music and video playback shared from the desktop.
       echoCancellation: false,
       noiseSuppression: false,
-      autoGainControl: false
+      autoGainControl: false,
+      restrictOwnAudio: true,
+      suppressLocalAudioPlayback: false
     },
     // Chromium-only hints: don't offer the tab we're running in (avoids the
     // infinite-mirror effect) and let the user swap surfaces without restarting.
     selfBrowserSurface: 'exclude',
-    surfaceSwitching: 'include',
-    systemAudio: 'include'
-  } as MediaStreamConstraints;
+    surfaceSwitching: 'exclude',
+    systemAudio: restrictOwnAudio ? 'include' : 'exclude',
+    windowAudio: restrictOwnAudio ? 'system' : 'window'
+  } as DisplayMediaStreamOptions;
 }
 
 export type DisplaySurface = 'browser' | 'window' | 'monitor' | 'unknown';
@@ -192,40 +210,42 @@ export function getDisplaySurface(track: MediaStreamTrack): DisplaySurface {
   return 'unknown';
 }
 
-/**
- * Whether the audio captured alongside this surface may be mixed into our
- * outgoing stream.
- *
- * Tab ("browser") audio is scoped to the captured tab, and the picker excludes
- * our own tab via selfBrowserSurface, so it cannot contain the call — always safe.
- *
- * Screen and window captures take the machine's entire audio output. That is the
- * only way to share a desktop application's sound (a game, Steam or Discord voice
- * chat), but it also picks up the other participants being played on this machine
- * and sends them their own voice back as an echo. There is no way to capture one
- * without the other, so this is the caller's decision: `allowDesktopAudio` opts
- * into that trade-off, and it defaults to off.
- */
-export function canMixSystemAudio(surface: DisplaySurface, allowDesktopAudio: boolean): boolean {
+/** Tab audio is scoped to another tab. Desktop/window audio must confirm that
+ * the browser excluded audio produced by the WindWatch document. */
+export function canShareDisplayAudio(surface: DisplaySurface, ownAudioRestricted: boolean): boolean {
   if (surface === 'browser') return true;
-  return allowDesktopAudio;
+  return ownAudioRestricted;
 }
 
-/** Shown when desktop audio was captured but the user has not opted in. */
 export const SYSTEM_AUDIO_BLOCKED_HINT =
-  'Sistem sesi paylaşılmadı. Steam, Discord veya oyun sesini paylaşmak için ayarlar menüsünden "Masaüstü sesini paylaş" seçeneğini açın.';
+  'Tarayıcınız WindWatch sesini sistem sesinden ayıramıyor. Yankıyı önlemek için yalnızca görüntü paylaşılıyor. Ses için başka bir tarayıcı sekmesi paylaşın veya güncel Chrome / Edge kullanın.';
 
-/** Shown when desktop audio is being shared, so the echo risk is not a surprise. */
-export const DESKTOP_AUDIO_ECHO_HINT =
-  'Masaüstü sesi paylaşılıyor. Konuşan katılımcılar kendi seslerini yankı olarak duyabilir — konuşmayanların mikrofonu kapalı tutması önerilir.';
+/** Validate the actual track before sending it. An unsupported constraint is
+ * silently ignored, so requesting the filter alone is insufficient. */
+export async function protectDisplayAudio(stream: MediaStream): Promise<boolean> {
+  const video = stream.getVideoTracks()[0];
+  const surface = video ? getDisplaySurface(video) : 'unknown';
+  let blocked = false;
+  for (const track of stream.getAudioTracks()) {
+    const restricted = () => (track.getSettings() as MediaTrackSettings & { restrictOwnAudio?: boolean }).restrictOwnAudio === true;
+    if (surface !== 'browser' && !restricted() && supportsOwnAudioRestriction()) {
+      try {
+        await track.applyConstraints({ restrictOwnAudio: { exact: true } } as MediaTrackConstraints);
+      } catch { /* The selected source cannot provide the filter. */ }
+    }
+    if (!canShareDisplayAudio(surface, restricted())) {
+      track.stop();
+      stream.removeTrack(track);
+      blocked = true;
+    }
+  }
+  return blocked;
+}
 
 export interface VideoEncodingOptions {
   maxBitrate: number;
   maxFramerate?: number;
   degradationPreference?: RTCDegradationPreference;
-  priority?: string;
-  networkPriority?: string;
-  scaleResolutionDownBy?: number;
 }
 
 /**
@@ -239,29 +259,20 @@ export async function applyVideoEncoding(
   try {
     const params = sender.getParameters();
     if (!params.encodings || params.encodings.length === 0) {
-      // Some implementations hand back an empty list before the first negotiation
-      params.encodings = [{}];
+      return false;
     }
 
-    const encoding = params.encodings[0] as any;
+    const encoding = params.encodings[0];
     encoding.maxBitrate = opts.maxBitrate;
     if (opts.maxFramerate !== undefined) encoding.maxFramerate = opts.maxFramerate;
-    if (opts.scaleResolutionDownBy !== undefined) {
-      encoding.scaleResolutionDownBy = opts.scaleResolutionDownBy;
-    } else {
-      delete encoding.scaleResolutionDownBy;
-    }
-    if (opts.priority) encoding.priority = opts.priority;
-    if (opts.networkPriority) encoding.networkPriority = opts.networkPriority;
-
     if (opts.degradationPreference) {
-      (params as any).degradationPreference = opts.degradationPreference;
+      params.degradationPreference = opts.degradationPreference;
     }
 
     await sender.setParameters(params);
     return true;
-  } catch (err) {
-    console.warn('Failed to apply video sender parameters:', err);
+  } catch {
+    // Encoding hints are optional; native congestion control still runs.
     return false;
   }
 }
@@ -275,19 +286,8 @@ export function screenEncodingFor(preset: ScreenSharePreset): VideoEncodingOptio
   return {
     maxBitrate: preset.maxBitrate,
     maxFramerate: preset.frameRate,
-    degradationPreference: preset.degradationPreference,
-    priority: 'high',
-    networkPriority: 'high'
+    degradationPreference: preset.degradationPreference
   };
-}
-
-export interface ScreenShareStats {
-  width: number;
-  height: number;
-  fps: number;
-  kbps: number;
-  /** Why the encoder is holding back, if it is: 'bandwidth' | 'cpu' | 'none' | ... */
-  limitation: string;
 }
 
 export function formatBitrate(kbps: number): string {

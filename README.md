@@ -1,137 +1,115 @@
-# 🌬️ WindWatch
+# WindWatch
 
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D%2018.0.0-blue.svg?style=flat-sharp&logo=node.js)](https://nodejs.org/)
-[![React Version](https://img.shields.io/badge/react-v19.0-blue?style=flat-sharp&logo=react)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/typescript-v6.0-blue?style=flat-sharp&logo=typescript)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/vite-v8.0-646CFF?style=flat-sharp&logo=vite)](https://vite.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-sharp)](https://opensource.org/licenses/MIT)
+Hesap gerektirmeyen sesli görüşme, kamera, ekran paylaşımı ve sohbet uygulaması.
+React / TypeScript arayüzü, Socket.IO oda yönetimi ve tarayıcının yerleşik WebRTC
+bağlantıları kullanılır. Medya ve dosyalar katılımcılar arasında taşınır.
 
-**WindWatch**, hesap oluşturma zorunluluğu bulunmayan, tamamen anonim ve gerçek zamanlı bir sesli, görüntülü sohbet ve ekran paylaşım platformudur. WebRTC P2P (Peer-to-Peer) teknolojisini Socket.io sinyalleşme altyapısıyla harmanlayarak yüksek hızlı, güvenli ve gecikmesiz bir iletişim deneyimi sunar.
+## Çalıştırma
 
----
+Node.js **22.12 veya üzeri** gerekir. İki terminal açın:
 
-## ✨ Özellikler
-
-*   🎥 **Görüntülü ve Sesli İletişim (P2P):** Doğrudan tarayıcılar arası (WebRTC) yüksek kaliteli, şifreli ses ve görüntü akışı.
-*   🖥️ **Yüksek Performanslı Ekran Paylaşımı:** 60 FPS'e kadar akıcı, 1080p limitli ekran paylaşımı. Sistem sesini mikrofon sesiyle harmanlayarak iletme (Audio Mixing) özelliği.
-*   💬 **Gerçek Zamanlı Sohbet:** Odadaki katılımcılar arasında güvenli, anlık mesajlaşma paneli.
-*   🎨 **Premium Arayüz & Cam Morfizmi (Glassmorphic UI):** Hareketli mesh-gradient ışık küreleri, modern cam morfizmi kart tasarımları ve esnek (responsive) video ızgara sistemi.
-*   🔒 **Güvenlik Odaklı Mimari:**
-    *   **DoS Koruması:** Boş kalan ve kullanılmayan odaların RAM tüketmesini önleyen sunucu taraflı Çöp Toplayıcı (Garbage Collector).
-    *   **Rate Limiting:** WebSocket mesaj hız sınırlayıcı ve `/create-room` API limitleri ile spam/sel saldırılarına karşı koruma.
-    *   **XSS Koruması:** React'in güvenli render motoru ve sunucu taraflı sanitization kontrolleri.
-    *   **Güvenli Başlıklar:** Helmet ve sıkılaştırılmış CSP (Content Security Policy) yapılandırmaları.
-
----
-
-## 🛠️ Teknoloji Yığını
-
-### Frontend
-*   **Çekirdek:** React 19, TypeScript, Vite
-*   **İletişim:** PeerJS (WebRTC Wrapper), Socket.io Client
-*   **Tasarım & İkonlar:** Vanilla CSS, Lucide React
-*   **Kod Düzeni:** Oxlint, TypeScript compiler (`tsc`)
-
-### Backend
-*   **Çekirdek:** Node.js, Express
-*   **Sinyalleşme:** Socket.io, ExpressPeerServer (PeerJS Server)
-*   **Güvenlik:** Helmet (CSP), Express Rate Limit, CORS Whitelist
-
----
-
-## 📂 Proje Yapısı
-
-```text
-windwatch/
-├── backend/               # Sunucu ve Sinyalleşme Servisleri
-│   ├── src/
-│   │   ├── server.js      # Ana sunucu kurulumu & middleware'ler
-│   │   ├── rooms.js       # Bellek içi (In-memory) oda yönetimi & GC
-│   │   └── socketHandler.js # WebSocket event yönetimleri ve hız limitleri
-│   ├── package.json
-│   └── package-lock.json
-│
-└── frontend/              # Arayüz ve WebRTC İstemcisi
-    ├── src/
-    │   ├── components/
-    │   │   ├── Home.tsx   # Sekmeli (Tabbed) giriş & oda katılım arayüzü
-    │   │   ├── Room.tsx   # Canlı oda akışı & WebRTC yönetimi
-    │   │   ├── Chat.tsx   # Sohbet paneli
-    │   │   ├── Controls.tsx # Medya kontrolleri (Mikrofon, Kamera, Ekran)
-    │   │   └── VideoGrid.tsx # Katılımcı video yerleşim ızgarası
-    │   ├── App.tsx
-    │   ├── index.css      # Tema değişkenleri, cam morfizmi ve animasyonlar
-    │   └── main.tsx
-    ├── package.json
-    └── vite.config.ts
-```
-
----
-
-## 🚀 Kurulum ve Çalıştırma
-
-Projeyi yerel bilgisayarınızda çalıştırmak için aşağıdaki adımları sırasıyla uygulayınız.
-
-### Gereksinimler
-*   Node.js (v18.0.0 veya üzeri)
-*   npm (veya yarn)
-
-### 1. Depoyu Klonlayın
-```bash
-git clone https://github.com/kullanici_adi/windwatch.git
-cd windwatch
-```
-
-### 2. Backend Kurulumu ve Çalıştırma
-```bash
+```powershell
 cd backend
-npm install
-# Geliştirici modu (Nodemon ile)
-npm run dev
-# veya normal başlatma
-npm start
-```
-*Backend varsayılan olarak `http://localhost:5000` portu üzerinde çalışmaya başlayacaktır.*
-
-### 3. Frontend Kurulumu ve Çalıştırma
-```bash
-# Projenin kök dizininden frontend'e geçin
-cd ../frontend
-npm install
-# Geliştirici sunucusunu başlatın
+npm ci
 npm run dev
 ```
-*Frontend varsayılan olarak `http://localhost:5173` portu üzerinde çalışmaya başlayacaktır.*
 
----
-
-## ⚙️ Çevre Değişkenleri (Environment Variables)
-
-### Frontend (`frontend/.env`)
-Varsayılan olarak localhost ayarlanmıştır, ancak farklı bir sunucu adresi kullanıyorsanız `.env` dosyası oluşturup tanımlayabilirsiniz:
-```env
-VITE_BACKEND_URL=http://localhost:5000
+```powershell
+cd frontend
+npm ci
+npm run dev
 ```
 
-### Backend (`backend/.env`)
+Arayüz: `http://localhost:5173`, sunucu: `http://localhost:5000`.
+Kamera, mikrofon ve ekran paylaşımı localhost dışında HTTPS gerektirir.
+
+## Ekran paylaşımı ve ses
+
+- Paylaşım penceresinde **Sesi paylaş** seçeneğini işaretleyin.
+- Mikrofon, kamera, ekran görüntüsü ve ekran sesi ayrı WebRTC kanallarındadır.
+  Mikrofonu kapatmak ekran sesini kapatmaz; kamera ekran paylaşımı sırasında da çalışır.
+- `restrictOwnAudio: true` ile WindWatch sekmesinin ürettiği ses, yakalanan sistem
+  sesinden çıkarılır. Katılımcı sesleri yeniden odaya gönderilmez.
+- Paylaşımın ses izi kontrol edilir. Tarayıcı masaüstü/pencere sesinden WindWatch
+  sesini ayırmayı doğrulayamıyorsa yalnızca o ses izi durdurulur; görüntü ve
+  mikrofon devam eder. Başka bir tarayıcı sekmesini sesli paylaşmak kullanılabilir.
+- Bu özellik Chrome 141 ile eklendi; işletim sistemi ve seçilen kaynak da ses
+  yakalama desteğini belirler. [Chrome sürüm notları](https://developer.chrome.com/release-notes/141#support_restrictownaudio).
+- WindWatch sekmesi paylaşım seçiminden hariç tutulur. Kaynak değiştirmek için
+  paylaşımı durdurup yeni kaynağı seçin.
+- Kalite ayarları paylaşım sürerken değiştirilebilir. Yerleşik WebRTC tıkanıklık
+  kontrolü çalışır; seçilen bitrate yalnızca üst sınırdır.
+
+Katılımcı sesi kartların görünürlüğünden bağımsız çalar. Sohbeti açmak, yayını
+sabitlemek veya mobilde küçük kartları gizlemek sesleri kesmez. Tarayıcı otomatik
+ses oynatmayı engellerse **Katılımcıların sesini duymak için tıklayın** düğmesi görünür.
+
+## Dağıtım ayarları
+
+`backend/.env` örneği (npm start / npm run dev bu dosyayı yükler):
+
 ```env
 PORT=5000
-FRONTEND_URL=http://localhost:5173
-NODE_ENV=development
+FRONTEND_URL=https://windwatch.example.com
+NODE_ENV=production
 ```
 
----
+Birden fazla izinli arayüz adresi `FRONTEND_URL` içinde virgülle ayrılabilir.
 
-## 🔒 Güvenlik Notları & Sıkılaştırma
+`frontend/.env` örneği (Vite derleme sırasında okur):
 
-Projede yakın zamanda yapılan güvenlik denetimleri doğrultusunda şu sıkılaştırmalar uygulanmıştır:
-1.  **PeerJS Debug Log Sızıntısı Engellendi:** Canlı ortamlarda (`NODE_ENV=production`) PeerJS sinyal loglarının sızmaması için debug özellikleri kapatıldı.
-2.  **Otomatik Bellek Boşaltma:** Kullanıcıların oda oluşturup hiç katılmadığı durumlar için 2 dakikalık zaman aşımına sahip bir sunucu temizlik mekanizması entegre edilerek sunucunun kilitlenmesi engellendi.
-3.  **Spam Koruması (Rate Limit):** Kullanıcıların sohbet kanalını sabote etmesini engellemek üzere WebSocket seviyesinde saniyede en fazla 5 mesaj limiti uygulandı.
-4.  **Güvenli Bağımlılıklar:** Kritik zafiyet barındıran `uuid` paketi en güncel kararlı sürümle güncellenerek `npm audit` seviyesi temizlendi.
+```env
+VITE_BACKEND_URL=https://api.windwatch.example.com
+VITE_TURN_URL=turn:turn.example.com:3478,turns:turn.example.com:5349
+VITE_TURN_USERNAME=your-turn-username
+VITE_TURN_CREDENTIAL=your-turn-credential
+```
 
----
+**TURN sunucusu:** STUN tek başına bazı mobil ağlar, kurumsal ağlar ve simetrik NAT
+arkasındaki katılımcıları bağlayamaz. Bu ağlarda medya için çalışan bir TURN
+hizmeti gerekir. Özel TURN ayarlanmamışsa önceki PeerJS yapılandırmasının herkese
+açık röleleri yedek olarak korunur; bunların erişilebilirliği garanti değildir.
+Üretimde yukarıdaki ayarlarla kendi TURN hizmetinizi kullanın. Statik Vite ayarları kullanıcıya görünür;
+üretimde süreli TURN kimlik bilgileri kullanılması önerilir.
 
-## 📄 Lisans
+Arayüz ve sunucu **birlikte** güncellenmelidir. Eski PeerJS protokolü kaldırıldı;
+eski istemciyle yeni sunucu arasında medya bağlantısı kurulmaz. `/peer` servisi
+artık kullanılmaz. Ters proxy Socket.IO için WebSocket yükseltmesini desteklemelidir.
 
-Bu proje **MIT Lisansı** altında lisanslanmıştır. Detaylar için `LICENSE` dosyasına göz atabilirsiniz.
+## Oda ve dosya davranışı
+
+- P2P bağlantılar her katılımcı çifti arasında kurulur. Oda en fazla **8 kişi**
+  alır; daha büyük gruplar için bir SFU altyapısı gerekir.
+- Aynı anda tek ekran paylaşımı yapılabilir. Sunucudan onay gelmeden paylaşım
+  yayımlanmaz; zaman aşımında yakalanan cihazlar serbest bırakılır.
+- Geçici bağlantı kopmasında üyelik ve kurucu yetkisi 20 saniye korunur. Medya
+  bağlantısı bozulursa yeniden kurulur. Boş odalar 10 dakika sonra temizlenir.
+- Odalar ve son 50 mesaj bellekte tutulur; sunucu yeniden başlatılırsa silinir.
+- Dosya başına 100 MB, oturum başına toplam 250 MB paylaşılabilir. Dosyalar
+  16 KB parçalarla ve gönderim tamponu sınırıyla aktarılır; sunucuda saklanmaz.
+  Gönderen ayrılır veya sayfayı yenilerse önceki dosya teklifleri kullanılamaz.
+
+## Kontroller
+
+```powershell
+cd backend
+npm test
+npm audit
+```
+
+```powershell
+cd frontend
+npx playwright install chromium
+npm test
+npm run build
+npm run lint
+npm audit
+```
+
+Tarayıcı testleri gerçek iki/üç katılımcılı RTCPeerConnection bağlantıları kurar;
+kamera ve mikrofon için tarayıcının test cihazları, ekran için üretilen test
+akışları kullanılır. Ayrı medya izleri, mobil sohbet sırasında ses, sonradan
+katılım, bağlantı kurtarma, izin beklerken ayrılma, onay zaman aşımı ve dosya
+bütünlüğü doğrulanır. İşletim sisteminin gerçek ekran/sistem sesi yakalaması,
+gerçek mikrofon-kulaklık akustiği ve uzak ağlardaki TURN bağlantısı bu otomatik
+testlerin kapsamı dışındadır.

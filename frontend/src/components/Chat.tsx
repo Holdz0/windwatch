@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, X, Paperclip, FileText, Download, Check, ExternalLink } from 'lucide-react';
-import type { ChatMessage, SharedFileMeta } from './Room';
-import { parseFileMessage } from './Room';
+import type { ChatMessage, SharedFileMeta } from '../types';
+import { parseFileMessage } from '../types';
 
 interface ChatProps {
   messages: ChatMessage[];
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => boolean;
   onShareFile: (file: File) => void;
   onDownloadFile: (senderSocketId: string, file: SharedFileMeta) => Promise<void>;
   myId: string;
@@ -33,7 +33,7 @@ const Chat: React.FC<ChatProps> = ({
   isBottomSheet = false
 }) => {
   const [inputText, setInputText] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // --- Bottom sheet drag ---------------------------------------------------
@@ -105,14 +105,14 @@ const Chat: React.FC<ChatProps> = ({
 
   // Auto-scroll to bottom of chat when new message arrives
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const list = messagesRef.current;
+    list?.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputText.trim()) return;
-    onSendMessage(inputText);
-    setInputText('');
+    if (onSendMessage(inputText)) setInputText('');
   };
 
   const handlePaperclipClick = () => {
@@ -234,7 +234,7 @@ const Chat: React.FC<ChatProps> = ({
       </div>
 
       {/* Message History */}
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesRef}>
         {messages.length === 0 ? (
           <div style={{
             color: 'var(--color-text-muted)',
@@ -247,12 +247,12 @@ const Chat: React.FC<ChatProps> = ({
         ) : (
           messages.map((msg, index) => {
             const isSystem = msg.senderId === 'system';
-            const isMe = msg.senderId === myId;
+            const isMe = msg.senderId === myId || msg.senderPeerId === myId;
             const fileMeta = parseFileMessage(msg.text);
 
             if (isSystem) {
               return (
-                <div key={index} className="chat-system-message">
+                <div key={msg.id || index} className="chat-system-message">
                   <span>{msg.text}</span>
                 </div>
               );
@@ -263,7 +263,7 @@ const Chat: React.FC<ChatProps> = ({
               const isDownloading = !!downloadingFiles[fileMeta.id];
 
               return (
-                <div key={index} className={`chat-bubble file-card-bubble ${isMe ? 'self' : 'other'}`}>
+                <div key={msg.id || index} className={`chat-bubble file-card-bubble ${isMe ? 'self' : 'other'}`}>
                   {!isMe && (
                     <span className="chat-sender-name">{msg.senderName}</span>
                   )}
@@ -304,7 +304,7 @@ const Chat: React.FC<ChatProps> = ({
 
             return (
               <div 
-                key={index} 
+                key={msg.id || index}
                 className={`chat-bubble ${isMe ? 'self' : 'other'}`}
               >
                 {!isMe && (
@@ -318,7 +318,6 @@ const Chat: React.FC<ChatProps> = ({
             );
           })
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Hidden File Input */}
@@ -355,6 +354,4 @@ const Chat: React.FC<ChatProps> = ({
   );
 };
 
-// Memoised: the room re-renders on stats/participant updates, and this
-// subtree is comparatively expensive to rebuild for no visual change.
-export default React.memo(Chat);
+export default Chat;
